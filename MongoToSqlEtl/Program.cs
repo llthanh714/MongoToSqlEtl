@@ -47,23 +47,14 @@ namespace MongoToSqlEtl
                 StringComparer.OrdinalIgnoreCase // Rất quan trọng khi SQL Server không phân biệt hoa/thường
             );
 
-            // With this corrected line:
-
-
-
-            // Tạo một HashSet chứa tên các cột để tra cứu nhanh hơn và không phân biệt chữ hoa/thường
-
-
-            // Tạo một HashSet chứa tên các cột để tra cứu nhanh hơn và không phân biệt chữ hoa/thường
-
-
-            // 2. ĐỊNH NGHĨA CÁC THÀNH PHẦN
-            // Nguồn MongoDB
+            // Get data from MongoDB
             var startDate = new DateTime(2025, 7, 6, 0, 0, 0, DateTimeKind.Utc);
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
+            var client = new MongoClient(mongoConnectionString);
+
             var source = new MongoDbSource<ExpandoObject>
             {
-                ConnectionString = mongoConnectionString,
+                DbClient = client,
                 DatabaseName = "arcusairdb",
                 CollectionName = "patientorders",
                 Filter = filter,
@@ -73,19 +64,19 @@ namespace MongoToSqlEtl
                 }
             };
 
+            // Create destination table definition
             var dest_patientorders = new DbMerge<ExpandoObject>(sqlConnectionManager, "patientorders")
             {
-                TableDefinition = tableDef,
+                TableDefinition = patientordersDef,
                 MergeMode = MergeMode.InsertsAndUpdates,
                 IdColumns =
                 [
                     new IdColumn { IdPropertyName = "_id" }
                 ],
-                //MergeMode = MergeMode.InsertsAndUpdates,
-                BatchSize = 500 // Giới hạn kích thước lô để tránh quá tải
+                BatchSize = 500
             };
 
-            var dest_patientorders_patientorderitems = new DbMerge<ExpandoObject>(sqlConnectionManager, "patientorderitems")
+            var dest_patientorderitems = new DbMerge<ExpandoObject>(sqlConnectionManager, "patientorderitems")
             {
                 TableDefinition = patientorderitemsDef,
                 IdColumns =
@@ -93,66 +84,57 @@ namespace MongoToSqlEtl
                     new IdColumn { IdPropertyName = "_id" }
                 ],
                 MergeMode = MergeMode.InsertsAndUpdates,
-                BatchSize = 500 // Giới hạn kích thước lô để tránh quá tải
+                BatchSize = 500
             };
 
-            //var dest_patientorderitems_dispensebatchdetail = new DbMerge<ExpandoObject>(sqlConnectionManager, "patientorderitems_dispensebatchdetail")
-            //{
-            //    MergeMode = MergeMode.Delta,
-            //    BatchSize = 500 // Giới hạn kích thước lô để tránh quá tải
-            //};
+            // STEP 1: PATIENTORDERS
+            // Create multicast for processing
+            var multicast = new Multicast<ExpandoObject>();
 
-            // --- GIAI ĐOẠN 1: patientorders -> patientorderitems ---
-
-            var mc_Invoice = new Multicast<ExpandoObject>();
-
-            // Nhánh 1.1: Xử lý và ghi vào bảng patientorders
-            var proc_patientorders = new RowTransformation<ExpandoObject>(row =>
+            // Processing patientorders
+            var rowtransform_patientorders = new RowTransformation<ExpandoObject>(row =>
             {
-                var sourceAsDict = (IDictionary<string, object>)row;
-                var targetOrder = new ExpandoObject();
-                var targetDict = (IDictionary<string, object>)targetOrder;
+                var sourceAsDict = (IDictionary<string, object?>)row;
+                var targetPatientOrders = new ExpandoObject();
+                var targetDict = (IDictionary<string, object?>)targetPatientOrders;
 
-                // Duyệt qua tất cả các thuộc tính có trong document từ MongoDB
+                // Go through all properties in the source document
                 foreach (var property in sourceAsDict)
                 {
-                    // Kiểm tra xem tên thuộc tính có khớp với một cột nào trong bảng SQL không
+                    // Check if the property name matches any column in the SQL table
                     if (patientordersColumns.Contains(property.Key))
                     {
                         MapProperty(sourceAsDict, targetDict, property.Key);
                     }
                 }
 
-                return targetOrder;
+                return targetPatientOrders;
             });
 
-            //Nhánh 1.2: Làm phẳng patientorderitems
+            // Flatten patientorderitems from patientorders
             var flat_patientorderitems = new RowMultiplication<ExpandoObject, ExpandoObject>(row =>
             {
-                dynamic parentDoc = row;
                 var extractedPatientOrderItems = new List<ExpandoObject>();
-                var parentAsDict = (IDictionary<string, object>)parentDoc;
+                var parentAsDict = (IDictionary<string, object?>)row;
 
-                if (parentAsDict.ContainsKey("patientorderitems") && parentAsDict["patientorderitems"] is IEnumerable<object> items)
+                if (parentAsDict.TryGetValue("patientorderitems", out object? value) && value is IEnumerable<object> orderItems)
                 {
-                    foreach (object sourceItem in items)
+                    foreach (object? sourceItem in orderItems)
                     {
-                        var itemAsDict = (IDictionary<string, object>)sourceItem;
+                        var itemAsDict = (IDictionary<string, object?>)sourceItem;
                         var targetLineItem = new ExpandoObject();
-                        var targetDict = (IDictionary<string, object>)targetLineItem;
+                        var targetDict = (IDictionary<string, object?>)targetLineItem;
 
-                        // Sao chép tất cả thuộc tính của patientorderitems
+                        // Go through all properties in the patientorderitems
                         foreach (var prop in itemAsDict)
                         {
                             if (patientorderitemsColumns.Contains(prop.Key))
                             {
                                 MapProperty(itemAsDict, targetDict, prop.Key);
                             }
-
-                            //targetDict[prop.Key] = prop.Value;
                         }
 
-                        // Thêm khóa ngoại trỏ về patientorders
+                        // Add foreign key to link back to the parent patientorder
                         targetDict["patientordersuid"] = parentAsDict["_id"];
 
                         extractedPatientOrderItems.Add(targetLineItem);
@@ -161,43 +143,27 @@ namespace MongoToSqlEtl
                 return extractedPatientOrderItems;
             });
 
+            // STEP 2: PATIENTORDERITEMS
+            // Multicast for patientorderitems
+            var multicast_patientorderitems = new Multicast<ExpandoObject>();
 
-            // --- GIAI ĐOẠN 2: patientorderitems -> dispensebatchdetail ---
-
-            var mc_patientorderitems = new Multicast<ExpandoObject>();
-
-            // Nhánh 2.1: Xử lý và ghi vào bảng patientorders_patientorderitems
-            // Trong trường hợp này, flat_patientorderitems đã có đủ dữ liệu, ta có thể không cần proc_patientorderitems
-            // và link trực tiếp đến đích nếu không có thêm transformation nào.
-            // Tuy nhiên, giữ lại cấu trúc này nếu bạn cần xử lý thêm.
-
-            // With this corrected line:
-
-
-
-
-            var proc_patientorderitems = new RowTransformation<ExpandoObject>(row =>
+            // Flatten patientorderitems to prepare for insertion
+            var rowtransform_patientorderitems = new RowTransformation<ExpandoObject>(row =>
             {
-                var sourceAsDict = (IDictionary<string, object>)row;
+                var sourceAsDict = (IDictionary<string, object?>)row;
                 var targetOrderItem = new ExpandoObject();
-                var targetDict = (IDictionary<string, object>)targetOrderItem;
+                var targetDict = (IDictionary<string, object?>)targetOrderItem;
 
-                // Duyệt qua tất cả các thuộc tính có trong document từ MongoDB
+                // Go through all properties in the source document
                 foreach (var property in sourceAsDict)
                 {
-                    // Kiểm tra xem tên thuộc tính có khớp với một cột nào trong bảng SQL không
+                    // Check if the property name matches any column in the SQL table
                     if (patientorderitemsColumns.Contains(property.Key))
                     {
                         MapProperty(sourceAsDict, targetDict, property.Key);
                     }
                 }
-
                 return targetOrderItem;
-
-
-                // Nếu cần transformation thêm cho patientorderitems, hãy viết ở đây.
-                // Nếu không, chỉ cần trả về đối tượng gốc.
-                //return row;
             });
 
 
@@ -230,40 +196,39 @@ namespace MongoToSqlEtl
             //    return extractedDetails;
             //});
 
-            // 3. LIÊN KẾT CÁC THÀNH PHẦN
-            source.LinkTo(mc_Invoice);
+            //STEP 3: CONNECTING DATA FLOW
+            source.LinkTo(multicast);
 
             // -- Liên kết giai đoạn 1 --
-            mc_Invoice.LinkTo(proc_patientorders);
-            proc_patientorders.LinkTo(dest_patientorders);
-
-            mc_Invoice.LinkTo(flat_patientorderitems);
+            multicast.LinkTo(rowtransform_patientorders);
+            rowtransform_patientorders.LinkTo(dest_patientorders);
+            multicast.LinkTo(flat_patientorderitems);
 
             // -- Liên kết giai đoạn 2 --
-            flat_patientorderitems.LinkTo(mc_patientorderitems);
-
-            mc_patientorderitems.LinkTo(proc_patientorderitems);
-            proc_patientorderitems.LinkTo(dest_patientorders_patientorderitems);
+            flat_patientorderitems.LinkTo(multicast_patientorderitems);
+            multicast_patientorderitems.LinkTo(rowtransform_patientorderitems);
+            rowtransform_patientorderitems.LinkTo(dest_patientorderitems);
 
             //mc_patientorderitems.LinkTo(flat_patientorderitems_dispensebatchdetail);
             //flat_patientorderitems_dispensebatchdetail.LinkTo(dest_patientorderitems_dispensebatchdetail);
 
-            // 4. THỰC THI
-            Console.WriteLine("Bắt đầu quá trình ETL đa cấp...");
-
+            //STEP 4: EXECUTE ETL
+            Console.WriteLine("Start the ETL process...");
             await Network.ExecuteAsync(source);
-            Console.WriteLine("Quá trình ETL đã hoàn tất.");
-            Console.WriteLine($"Kiểm tra file 'error_log.csv' nếu có lỗi xảy ra.");
+            Console.WriteLine("Done");
+            //Console.WriteLine($"Kiểm tra file 'error_log.csv' nếu có lỗi xảy ra.");
         }
 
         /// <summary>
-        /// Ánh xạ một thuộc tính từ source Dictionary sang target Dictionary.
-        /// Xử lý trường hợp thuộc tính không tồn tại và chuyển đổi múi giờ cho DateTime.
+        /// Mapping properties from source dictionary to target dictionary.
         /// </summary>
-        private static void MapProperty(IDictionary<string, object> source, IDictionary<string, object> target, string key)
+        /// <param name="source"></param>
+        /// <param name="target"></param>
+        /// <param name="key"></param>
+        private static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key)
         {
             // Kiểm tra xem key có tồn tại trong dictionary nguồn không
-            if (source.TryGetValue(key, out object value))
+            if (source.TryGetValue(key, out object? value))
             {
                 // Xử lý trường hợp giá trị là null ngay từ đầu
                 if (value == null)
