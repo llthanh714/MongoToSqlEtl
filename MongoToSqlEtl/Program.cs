@@ -1,17 +1,13 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
-using ETLBox.Logging;
 using ETLBox.MongoDb;
 using ETLBox.SqlServer;
-using Google.Protobuf.WellKnownTypes;
-using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Collections;
 using System.Dynamic;
 using System.Text.Json;
-using System.Threading.Tasks.Dataflow;
 
 namespace MongoToSqlEtl
 {
@@ -54,7 +50,7 @@ namespace MongoToSqlEtl
             );
 
             // Get data from MongoDB
-            var startDate = new DateTime(2025, 7, 6, 0, 0, 0, DateTimeKind.Utc);
+            var startDate = new DateTime(2025, 7, 7, 0, 0, 0, DateTimeKind.Utc);
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
             var client = new MongoClient(mongoConnectionString);
 
@@ -129,6 +125,18 @@ namespace MongoToSqlEtl
                 var targetPatientOrders = new ExpandoObject();
                 var targetDict = (IDictionary<string, object?>)targetPatientOrders;
 
+                // --- LOGIC ĐÃ ĐƯỢC SỬA ĐỔI ---
+                // Lặp qua danh sách các cột mà BẢNG ĐÍCH yêu cầu (được định nghĩa trong patientordersColumns)
+                foreach (var columnName in patientordersColumns)
+                {
+                    // Gọi MapProperty cho mỗi cột.
+                    // MapProperty sẽ tự xử lý việc gán giá trị hoặc DBNull.Value nếu không tìm thấy trong nguồn.
+                    MapProperty(sourceAsDict, targetDict, columnName);
+                }
+                // --------------------------------
+
+                // Đoạn code cũ đã được thay thế bằng khối logic ở trên:
+                /*
                 // Go through all properties in the source document
                 foreach (var property in sourceAsDict)
                 {
@@ -138,6 +146,7 @@ namespace MongoToSqlEtl
                         MapProperty(sourceAsDict, targetDict, property.Key);
                     }
                 }
+                */
 
                 return targetPatientOrders;
             });
@@ -156,15 +165,18 @@ namespace MongoToSqlEtl
                         var targetLineItem = new ExpandoObject();
                         var targetDict = (IDictionary<string, object?>)targetLineItem;
 
-                        // Go through all properties in the patientorderitems
-                        foreach (var prop in itemAsDict)
+                        // --- PHẦN SỬA ĐỔI QUAN TRỌNG ---
+                        // Lặp qua danh sách các cột mà BẢNG ĐÍCH yêu cầu.
+                        foreach (var columnName in patientorderitemsColumns)
                         {
-                            if (patientorderitemsColumns.Contains(prop.Key))
-                            {
-                                MapProperty(itemAsDict, targetDict, prop.Key);
-                                Console.WriteLine(itemAsDict["_id"]);
-                            }
+                            // Gọi MapProperty cho MỖI cột mà đích cần.
+                            // Hàm MapProperty sẽ tự động xử lý việc gán DBNull.Value 
+                            // nếu cột không tồn tại trong nguồn (itemAsDict).
+                            MapProperty(itemAsDict, targetDict, columnName);
                         }
+                        // ------------------------------------
+
+                        // Console.WriteLine(itemAsDict["_id"]); // Dòng này có thể gây lỗi nếu _id không tồn tại, nên cẩn thận
 
                         // Add foreign key to link back to the parent patientorder
                         targetDict["patientordersuid"] = parentAsDict["_id"];
@@ -186,15 +198,23 @@ namespace MongoToSqlEtl
                 var targetOrderItem = new ExpandoObject();
                 var targetDict = (IDictionary<string, object?>)targetOrderItem;
 
-                // Go through all properties in the source document
-                foreach (var property in sourceAsDict)
+                // Go through all properties in the dest document
+                foreach (var columnName in patientorderitemsColumns)
                 {
-                    // Check if the property name matches any column in the SQL table
-                    if (patientorderitemsColumns.Contains(property.Key))
-                    {
-                        MapProperty(sourceAsDict, targetDict, property.Key);
-                    }
+                    // Gọi MapProperty cho mỗi cột.
+                    // MapProperty sẽ tự xử lý việc gán giá trị hoặc DBNull.Value nếu không tìm thấy trong nguồn.
+                    MapProperty(sourceAsDict, targetDict, columnName);
                 }
+
+                //foreach (var property in sourceAsDict)
+                //{
+                //    // Check if the property name matches any column in the SQL table
+                //    if (patientorderitemsColumns.Contains(property.Key))
+                //    {
+                //        MapProperty(sourceAsDict, targetDict, property.Key);
+                //    }
+                //}
+
                 return targetOrderItem;
             });
 
