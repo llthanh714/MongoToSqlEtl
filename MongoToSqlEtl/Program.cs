@@ -1,13 +1,17 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
+using ETLBox.Logging;
 using ETLBox.MongoDb;
 using ETLBox.SqlServer;
+using Google.Protobuf.WellKnownTypes;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Collections;
 using System.Dynamic;
 using System.Text.Json;
+using System.Threading.Tasks.Dataflow;
 
 namespace MongoToSqlEtl
 {
@@ -15,6 +19,7 @@ namespace MongoToSqlEtl
     {
         public static async Task Main(string[] args)
         {
+            ArgumentNullException.ThrowIfNull(args);
             // Get configuration from appsettings.json
             IConfiguration config = new ConfigurationBuilder()
               .AddJsonFile("appsettings.json")
@@ -34,6 +39,7 @@ namespace MongoToSqlEtl
 
             // Connect to SQL Server and get table definitions
             var sqlConnectionManager = new SqlConnectionManager(sqlConnectionString);
+
             // patientorders table definition
             var patientordersDef = TableDefinition.FromTableName(sqlConnectionManager, "patientorders");
             var patientordersColumns = new HashSet<string>(
@@ -64,6 +70,10 @@ namespace MongoToSqlEtl
                 }
             };
 
+            // Create error and load process tables
+            //CreateErrorTableTask.Create(sqlConnectionManager, "etlbox_error");
+            //LoadProcessTask.CreateTable(sqlConnectionManager, "etlbox_loadprocess");
+
             // Create destination table definition
             var dest_patientorders = new DbMerge<ExpandoObject>(sqlConnectionManager, "patientorders")
             {
@@ -86,6 +96,27 @@ namespace MongoToSqlEtl
                 MergeMode = MergeMode.InsertsAndUpdates,
                 BatchSize = 500
             };
+
+            //var errorHandler = new ActionBlock<ETLBoxError>(error =>
+            //{
+            //    Console.BackgroundColor = ConsoleColor.Red;
+            //    Console.ForegroundColor = ConsoleColor.White;
+            //    Console.WriteLine($"\n--- ROW LEVEL ERROR ---");
+            //    Console.WriteLine($"MESSAGE: {error.GetException().Message}");
+            //    Console.ResetColor();
+
+            //    // In ra chính xác dòng dữ liệu đã gây ra lỗi
+            //    // Sử dụng JsonSerializer để hiển thị object cho dễ đọc
+            //    try
+            //    {
+            //        Console.WriteLine($"PROBLEM DATA: {error.RecordAsJson}");
+            //    }
+            //    catch
+            //    {
+            //        Console.WriteLine("PROBLEM DATA: (Could not be serialized to JSON)");
+            //    }
+            //    Console.WriteLine("-----------------------\n");
+            //});
 
             // STEP 1: PATIENTORDERS
             // Create multicast for processing
@@ -131,6 +162,7 @@ namespace MongoToSqlEtl
                             if (patientorderitemsColumns.Contains(prop.Key))
                             {
                                 MapProperty(itemAsDict, targetDict, prop.Key);
+                                Console.WriteLine(itemAsDict["_id"]);
                             }
                         }
 
@@ -198,6 +230,8 @@ namespace MongoToSqlEtl
 
             //STEP 3: CONNECTING DATA FLOW
             source.LinkTo(multicast);
+            // With this corrected code:
+            // dest_patientorders.LinkErrorTo();
 
             // -- Liên kết giai đoạn 1 --
             multicast.LinkTo(rowtransform_patientorders);
@@ -216,7 +250,6 @@ namespace MongoToSqlEtl
             Console.WriteLine("Start the ETL process...");
             await Network.ExecuteAsync(source);
             Console.WriteLine("Done");
-            //Console.WriteLine($"Kiểm tra file 'error_log.csv' nếu có lỗi xảy ra.");
         }
 
         /// <summary>
