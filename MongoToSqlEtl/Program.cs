@@ -83,7 +83,7 @@ namespace MongoToSqlEtl
 
         private static MongoDbSource<ExpandoObject> CreateMongoDbSource(MongoClient client)
         {
-            var startDate = DateTime.Now.AddHours(-5); //new DateTime(2025, 7, 9, 0, 0, 0, DateTimeKind.Utc);
+            var startDate = DateTime.Now.AddHours(-3); //new DateTime(2025, 7, 9, 0, 0, 0, DateTimeKind.Utc);
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
 
             return new MongoDbSource<ExpandoObject>
