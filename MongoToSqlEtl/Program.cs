@@ -13,17 +13,16 @@ namespace MongoToSqlEtl
 {
     public class Program
     {
-        // STEP 5: EXECUTE ETL PROCESS
         public static async Task Main(string[] args)
         {
             ArgumentNullException.ThrowIfNull(args);
 
-            // 1. Tải cấu hình và kết nối
+            // 1. Cấu hình và kết nối
             var config = LoadConfiguration();
             var sqlConnectionManager = CreateSqlConnectionManager(config);
             var mongoClient = CreateMongoDbClient(config);
 
-            // 2. Lấy định nghĩa (schema) của các bảng SQL đích
+            // 2. Lấy schema bảng đích
             var patientordersDef = TableDefinition.FromTableName(sqlConnectionManager, "patientorders");
             var patientorderitemsDef = TableDefinition.FromTableName(sqlConnectionManager, "patientorderitems");
             var dispensebatchdetailDef = TableDefinition.FromTableName(sqlConnectionManager, "dispensebatchdetail");
@@ -31,17 +30,24 @@ namespace MongoToSqlEtl
             var patientorderitemsColumns = new HashSet<string>(patientorderitemsDef.Columns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
             var dispensebatchdetailColumns = new HashSet<string>(dispensebatchdetailDef.Columns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
 
-            // 3. Khởi tạo các thành phần ETLBox (Source, Transformations, Destinations)
+            // 3. Khởi tạo các thành phần ETL
             var source = CreateMongoDbSource(mongoClient);
-            var (transformPatientOrders, flattenOrderItems) = CreateTransformations(patientordersColumns, patientorderitemsColumns);
+
+            // Các bước transformation
+            var transformPatientOrders = CreateTransformComponent(patientordersColumns);
+            // Hàm này sẽ làm phẳng và chuẩn hóa kiểu dữ liệu cho items
+            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems();
+            // Hàm này chỉ chọn các cột cần thiết cho SQL
+            var transformOrderItemForSql = CreateTransformComponent(patientorderitemsColumns);
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation(dispensebatchdetailColumns);
 
-            var destPatientOrders = CreateDbMergeDestination(sqlConnectionManager, patientordersDef, "patientorders");
-            var destPatientOrderItems = CreateDbMergeDestination(sqlConnectionManager, patientorderitemsDef, "patientorderitems");
-            var destDispenseBatchDetail = CreateDbMergeDestination(sqlConnectionManager, dispensebatchdetailDef, "dispensebatchdetail");
+            // Destinations
+            var destPatientOrders = CreateDbMergeDestination(sqlConnectionManager, "patientorders");
+            var destPatientOrderItems = CreateDbMergeDestination(sqlConnectionManager, "patientorderitems");
+            var destDispenseBatchDetail = CreateDbMergeDestination(sqlConnectionManager, "dispensebatchdetail");
 
-            // 4. Xây dựng và liên kết các luồng dữ liệu (Data Flow Pipeline)
-            BuildAndLinkPipeline(source, transformPatientOrders, flattenOrderItems, flattenDispenseBatchDetails, destPatientOrders, destPatientOrderItems, destDispenseBatchDetail);
+            // 4. Xây dựng và liên kết pipeline
+            BuildAndLinkPipeline(source, transformPatientOrders, flattenAndNormalizeOrderItems, transformOrderItemForSql, flattenDispenseBatchDetails, destPatientOrders, destPatientOrderItems, destDispenseBatchDetail);
 
             Console.WriteLine("Starting ETL process...");
             await Network.ExecuteAsync(source);
@@ -49,108 +55,57 @@ namespace MongoToSqlEtl
         }
 
         #region STEP 1: Configuration and Connection Setup
-
-        private static IConfiguration LoadConfiguration()
-        {
-            return new ConfigurationBuilder()
-                .AddJsonFile("appsettings.json")
-                .Build();
-        }
-
+        private static IConfiguration LoadConfiguration() => new ConfigurationBuilder().AddJsonFile("appsettings.json").Build();
         private static SqlConnectionManager CreateSqlConnectionManager(IConfiguration config)
         {
-            string? sqlConnectionString = config.GetConnectionString("SqlServer");
-            if (string.IsNullOrEmpty(sqlConnectionString))
-            {
-                throw new InvalidOperationException("Connection string 'SqlServer' chưa được cấu hình trong appsettings.json");
-            }
-            return new SqlConnectionManager(sqlConnectionString);
+            string? cs = config.GetConnectionString("SqlServer") ?? throw new InvalidOperationException("Connection string 'SqlServer' not found.");
+            return new SqlConnectionManager(cs);
         }
-
         private static MongoClient CreateMongoDbClient(IConfiguration config)
         {
-            string? mongoConnectionString = config.GetConnectionString("MongoDb");
-            if (string.IsNullOrEmpty(mongoConnectionString))
-            {
-                throw new InvalidOperationException("Connection string 'MongoDb' chưa được cấu hình trong appsettings.json");
-            }
-            return new MongoClient(mongoConnectionString);
+            string? cs = config.GetConnectionString("MongoDb") ?? throw new InvalidOperationException("Connection string 'MongoDb' not found.");
+            return new MongoClient(cs);
         }
-
         #endregion
 
         #region STEP 2: ETL Component Creation
-
         private static MongoDbSource<ExpandoObject> CreateMongoDbSource(MongoClient client)
         {
-            var startDate = DateTime.Now.AddHours(-3); //new DateTime(2025, 7, 9, 0, 0, 0, DateTimeKind.Utc);
+            var startDate = DateTime.Now.AddHours(-3);
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
-
-            return new MongoDbSource<ExpandoObject>
-            {
-                DbClient = client,
-                DatabaseName = "arcusairdb",
-                CollectionName = "patientorders",
-                Filter = filter,
-                FindOptions = new FindOptions { BatchSize = 500 }
-            };
+            return new MongoDbSource<ExpandoObject> { DbClient = client, DatabaseName = "arcusairdb", CollectionName = "patientorders", Filter = filter, FindOptions = new FindOptions { BatchSize = 500 } };
         }
 
-        private static DbMerge<ExpandoObject> CreateDbMergeDestination(IConnectionManager connectionManager, TableDefinition tableDef, string tableName)
+        private static DbMerge<ExpandoObject> CreateDbMergeDestination(IConnectionManager conn, string tableName)
         {
-            return new DbMerge<ExpandoObject>(connectionManager, tableName)
-            {
-                TableDefinition = tableDef,
-                MergeMode = MergeMode.InsertsAndUpdates,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }],
-                BatchSize = 500
-            };
+            return new DbMerge<ExpandoObject>(conn, tableName) { MergeMode = MergeMode.InsertsAndUpdates, IdColumns = [new IdColumn { IdPropertyName = "_id" }], BatchSize = 500 };
         }
 
-        private static (RowTransformation<ExpandoObject>, RowMultiplication<ExpandoObject, ExpandoObject>) CreateTransformations(
-            HashSet<string> patientordersColumns,
-            HashSet<string> patientorderitemsColumns)
+        private static RowTransformation<ExpandoObject> CreateTransformComponent(HashSet<string> targetColumns)
         {
-            var transformPatientOrders = new RowTransformation<ExpandoObject>(
-                row => TransformPatientOrder(row, patientordersColumns)
-            );
-
-            var flattenOrderItems = new RowMultiplication<ExpandoObject, ExpandoObject>(
-                row => FlattenAndTransformOrderItems(row, patientorderitemsColumns)
-            );
-
-            return (transformPatientOrders, flattenOrderItems);
+            return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns));
         }
 
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(
-            HashSet<string> dispensebatchdetailsColumns)
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems()
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(
-                itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, dispensebatchdetailsColumns)
-            );
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(FlattenAndNormalizeItems);
         }
 
-
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
+        {
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols));
+        }
         #endregion
 
         #region STEP 3: Transformation Logic
-
-        private static ExpandoObject TransformPatientOrder(ExpandoObject row, ICollection<string> targetColumns)
-        {
-            var sourceAsDict = (IDictionary<string, object?>)row;
-            var targetDict = (IDictionary<string, object?>)new ExpandoObject();
-
-            foreach (var columnName in targetColumns)
-            {
-                MapProperty(sourceAsDict, targetDict, columnName);
-            }
-
-            return (ExpandoObject)targetDict;
-        }
-
-        private static IEnumerable<ExpandoObject> FlattenAndTransformOrderItems(ExpandoObject parentRow, ICollection<string> targetItemColumns)
+        private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
+            // Chuyển đổi _id của cha thành string trước khi dùng làm khóa ngoại
+            if (parentAsDict.TryGetValue("_id", out var parentId) && parentId is ObjectId poid)
+            {
+                parentAsDict["_id"] = poid.ToString();
+            }
 
             if (parentAsDict.TryGetValue("patientorderitems", out object? value) && value is IEnumerable<object> orderItems)
             {
@@ -158,45 +113,51 @@ namespace MongoToSqlEtl
                 {
                     if (sourceItem == null) continue;
 
-                    var itemAsDict = (IDictionary<string, object?>)sourceItem;
-                    var targetLineItem = new ExpandoObject();
-                    var targetDict = (IDictionary<string, object?>)targetLineItem;
+                    var newItem = new ExpandoObject();
+                    var newItemDict = (IDictionary<string, object?>)newItem;
+                    var sourceItemDict = (IDictionary<string, object?>)sourceItem;
 
-                    // Lặp qua các cột mà bảng đích patientorderitems yêu cầu
-                    foreach (var columnName in targetItemColumns)
+                    // Lặp qua tất cả các key của item nguồn để chuẩn hóa dữ liệu
+                    foreach (var key in sourceItemDict.Keys)
                     {
-                        MapProperty(itemAsDict, targetDict, columnName);
+                        MapProperty(sourceItemDict, newItemDict, key);
                     }
 
-                    // Thêm khóa ngoại để liên kết về patientorder cha
-                    targetDict["patientordersuid"] = parentAsDict["_id"];
+                    // Thêm khóa ngoại đã được chuẩn hóa
+                    newItemDict["patientordersuid"] = parentAsDict["_id"];
 
-                    yield return targetLineItem; // Sử dụng yield return để trả về từng item một cách hiệu quả
+                    yield return newItem;
                 }
             }
         }
 
-        private static IEnumerable<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject patientOrderItemRow, ICollection<string> targetDetailColumns)
+        private static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns)
         {
-            var patientOrderItemAsDict = (IDictionary<string, object?>)patientOrderItemRow;
+            var sourceAsDict = (IDictionary<string, object?>)sourceRow;
+            var targetDict = (IDictionary<string, object?>)new ExpandoObject();
 
-            if (patientOrderItemAsDict.TryGetValue("dispensebatchdetail", out object? value) && value is IEnumerable<object> dispenseDetails)
+            foreach (var columnName in targetColumns)
             {
-                foreach (object? sourceDetail in dispenseDetails)
+                MapProperty(sourceAsDict, targetDict, columnName);
+            }
+            if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id")) MapProperty(sourceAsDict, targetDict, "_id");
+            if (sourceAsDict.ContainsKey("patientordersuid") && !targetDict.ContainsKey("patientordersuid")) MapProperty(sourceAsDict, targetDict, "patientordersuid");
+
+            return (ExpandoObject)targetDict;
+        }
+
+        private static IEnumerable<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols)
+        {
+            var poItemDict = (IDictionary<string, object?>)poItemRow;
+            if (poItemDict.TryGetValue("dispensebatchdetail", out object? val) && val is IEnumerable<object> details)
+            {
+                foreach (object? detail in details)
                 {
-                    if (sourceDetail == null) continue;
-
-                    var detailAsDict = (IDictionary<string, object?>)sourceDetail;
-                    var targetDetailItem = new ExpandoObject();
-                    var targetDict = (IDictionary<string, object?>)targetDetailItem;
-
-                    foreach (var columnName in targetDetailColumns)
-                    {
-                        MapProperty(detailAsDict, targetDict, columnName);
-                    }
-
-                    targetDict["patientorderitemsuid"] = patientOrderItemAsDict["_id"];
-                    yield return targetDetailItem;
+                    if (detail == null) continue;
+                    var targetDetail = TransformObject((ExpandoObject)detail, cols);
+                    var targetDict = (IDictionary<string, object?>)targetDetail;
+                    targetDict["patientorderitemsuid"] = poItemDict["_id"];
+                    yield return targetDetail;
                 }
             }
         }
@@ -205,80 +166,65 @@ namespace MongoToSqlEtl
         {
             if (source.TryGetValue(key, out object? value))
             {
-                if (value == null)
+                if (value == null) { target[key] = DBNull.Value; return; }
+                if (value is DateTime utc)
                 {
-                    target[key] = DBNull.Value;
-                    return;
+                    try { target[key] = TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time")); }
+                    catch (TimeZoneNotFoundException) { target[key] = utc.AddHours(7); }
                 }
-
-                if (value is DateTime utcDateTime)
-                {
-                    try
-                    {
-                        var vietnamTime = TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"));
-                        target[key] = vietnamTime;
-                    }
-                    catch (TimeZoneNotFoundException)
-                    {
-                        target[key] = utcDateTime.AddHours(7); // Fallback
-                    }
-                }
-                else if (value is ObjectId objectId)
-                {
-                    target[key] = objectId.ToString();
-                }
+                else if (value is ObjectId oid) { target[key] = oid.ToString(); }
                 else if (value is IEnumerable && value is not string)
                 {
-                    target[key] = JsonSerializer.Serialize(value);
+                    if (key == "dispensebatchdetail")
+                    {
+                        target[key] = value;
+                    }
+                    else
+                    {
+                        target[key] = JsonSerializer.Serialize(value);
+                    }
                 }
-                else
-                {
-                    target[key] = value;
-                }
+                else { target[key] = value; }
             }
-            else
-            {
-                target[key] = DBNull.Value;
-            }
+            else { target[key] = DBNull.Value; }
         }
-
         #endregion
 
         #region STEP 4: Pipeline Linking
-
         private static void BuildAndLinkPipeline(
             MongoDbSource<ExpandoObject> source,
             RowTransformation<ExpandoObject> transformPatientOrders,
-            RowMultiplication<ExpandoObject, ExpandoObject> flattenOrderItems,
+            RowMultiplication<ExpandoObject, ExpandoObject> flattenAndNormalizeOrderItems,
+            RowTransformation<ExpandoObject> transformOrderItemForSql,
             RowMultiplication<ExpandoObject, ExpandoObject> flattenDispenseBatchDetails,
             DbMerge<ExpandoObject> destPatientOrders,
             DbMerge<ExpandoObject> destPatientOrderItems,
             DbMerge<ExpandoObject> destDispenseBatchDetails)
         {
             var multicastOrders = new Multicast<ExpandoObject>();
-            var multicastOrderItems = new Multicast<ExpandoObject>();
+            var multicastNormalizedItems = new Multicast<ExpandoObject>();
 
-            // Từ source, chia làm 2 nhánh (patientorders và patientorderitems)
+            // 1. Chia luồng source
             source.LinkTo(multicastOrders);
 
-            // Nhánh 1: Xử lý patientorders và đưa vào bảng patientorders
+            // 2. Nhánh 1: Biến đổi và lưu patientorders
             multicastOrders.LinkTo(transformPatientOrders);
             transformPatientOrders.LinkTo(destPatientOrders);
 
-            // Nhánh 2: Làm phẳng patientorderitems
-            multicastOrders.LinkTo(flattenOrderItems);
+            // 3. Nhánh 2: Làm phẳng và chuẩn hóa kiểu dữ liệu cho patientorderitems
+            multicastOrders.LinkTo(flattenAndNormalizeOrderItems);
 
-            // From flattened patientorderitems
-            flattenOrderItems.LinkTo(multicastOrderItems);
+            // 4. Chia luồng item đã được chuẩn hóa
+            flattenAndNormalizeOrderItems.LinkTo(multicastNormalizedItems);
 
-            // Nhánh 2.1: Đưa patientorderitems vào bảng patientorderitems
-            multicastOrderItems.LinkTo(destPatientOrderItems);
+            // 5. Nhánh 2a: Chỉ chọn các cột cần thiết cho SQL và lưu
+            multicastNormalizedItems.LinkTo(transformOrderItemForSql);
+            transformOrderItemForSql.LinkTo(destPatientOrderItems);
 
-            // Nhánh 2.2: Làm phẳng dispensebatchdetail và đưa vào bảng dispensebatchdetails
-            multicastOrderItems.LinkTo(flattenDispenseBatchDetails);
+            // 6. Nhánh 2b: Dùng item đã chuẩn hóa để làm phẳng lớp 3
+            multicastNormalizedItems.LinkTo(flattenDispenseBatchDetails);
             flattenDispenseBatchDetails.LinkTo(destDispenseBatchDetails);
         }
-
         #endregion
     }
 }
