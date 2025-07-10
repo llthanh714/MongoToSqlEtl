@@ -8,10 +8,54 @@ using MongoDB.Driver;
 using Serilog;
 using System.Collections;
 using System.Dynamic;
+using System.Globalization;
 using System.Text.Json;
 
 namespace MongoToSqlEtl
 {
+    public static class WatermarkManager
+    {
+        private static readonly string FilePath = "last_run_watermark.txt";
+        private static readonly DateTime DefaultStartDate = new(2025, 7, 10, 0, 0, 0, DateTimeKind.Utc);
+
+        public static DateTime GetLastRunTimestamp()
+        {
+            if (!File.Exists(FilePath))
+            {
+                Log.Information("Không tìm thấy file watermark, sử dụng ngày mặc định: {DefaultDate}", DefaultStartDate);
+                return DefaultStartDate;
+            }
+
+            try
+            {
+                var timestampString = File.ReadAllText(FilePath);
+                // Sử dụng định dạng "o" (round-trip) để đảm bảo tính chính xác và an toàn về múi giờ
+                var lastRun = DateTime.Parse(timestampString, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                Log.Information("Tìm thấy dấu mốc của lần chạy thành công trước: {LastRun}", lastRun);
+                return lastRun;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Không thể đọc hoặc phân tích file watermark. Sử dụng ngày mặc định.");
+                return DefaultStartDate;
+            }
+        }
+
+        public static void SaveCurrentRunTimestamp(DateTime currentRunTimestamp)
+        {
+            try
+            {
+                // Sử dụng định dạng "o" (round-trip) để lưu, đảm bảo ISO 8601 và giữ thông tin múi giờ.
+                File.WriteAllText(FilePath, currentRunTimestamp.ToString("o", CultureInfo.InvariantCulture));
+                Log.Information("Đã lưu thành công dấu mốc mới: {NewWatermark}", currentRunTimestamp);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Không thể lưu dấu mốc mới. Lần chạy tiếp theo sẽ bắt đầu từ dấu mốc cũ.");
+            }
+        }
+    }
+
     public class Program
     {
         public static async Task Main()
@@ -46,6 +90,13 @@ namespace MongoToSqlEtl
 
         private static async Task RunEtlProcess()
         {
+            // Ghi lại thời điểm bắt đầu của lần chạy này. Đây sẽ là dấu mốc mới nếu thành công.
+            var currentRunStartTime = DateTime.UtcNow;
+            Log.Information("Lần chạy ETL hiện tại bắt đầu lúc (UTC): {StartTime}", currentRunStartTime);
+
+            // Lấy dấu mốc từ lần chạy thành công trước đó.
+            var lastSuccessfulRun = WatermarkManager.GetLastRunTimestamp();
+
             // 1. Cấu hình và kết nối
             var config = LoadConfiguration();
             var sqlConnectionManager = CreateSqlConnectionManager(config);
@@ -57,7 +108,7 @@ namespace MongoToSqlEtl
             var dispensebatchdetailDef = TableDefinition.FromTableName(sqlConnectionManager, "dispensebatchdetail");
 
             // 3. Khởi tạo các thành phần ETL
-            var source = CreateMongoDbSource(mongoClient);
+            var source = CreateMongoDbSource(mongoClient, lastSuccessfulRun);
             var logErrors = CreateErrorLoggingDestination(); // Destination để ghi log lỗi
 
             // Các bước transformation
@@ -78,6 +129,10 @@ namespace MongoToSqlEtl
             Log.Information("Bắt đầu thực thi Network...");
             await Network.ExecuteAsync(source);
             Log.Information("Network đã thực thi xong.");
+
+            // Nếu đến được đây, Network đã chạy xong mà không có lỗi nghiêm trọng.
+            // Cập nhật dấu mốc cho lần chạy tiếp theo.
+            WatermarkManager.SaveCurrentRunTimestamp(currentRunStartTime);
         }
 
         #region STEP 1: Configuration and Connection Setup
@@ -95,11 +150,11 @@ namespace MongoToSqlEtl
         #endregion
 
         #region STEP 2: ETL Component Creation
-        private static MongoDbSource<ExpandoObject> CreateMongoDbSource(MongoClient client)
+        private static MongoDbSource<ExpandoObject> CreateMongoDbSource(MongoClient client, DateTime startDate)
         {
-            var startDate = DateTime.Now.AddHours(-3);
+            // Filter sẽ sử dụng startDate được truyền vào từ WatermarkManager
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
-            Log.Information("Lấy dữ liệu từ MongoDB được chỉnh sửa sau: {StartDate}", startDate);
+            Log.Information("Lấy dữ liệu từ MongoDB được chỉnh sửa kể từ (>=): {StartDate}", startDate);
             return new MongoDbSource<ExpandoObject> { DbClient = client, DatabaseName = "arcusairdb", CollectionName = "patientorders", Filter = filter, FindOptions = new FindOptions { BatchSize = 500 } };
         }
 
