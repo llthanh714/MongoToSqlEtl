@@ -22,7 +22,7 @@ namespace MongoToSqlEtl
             try
             {
                 var sql = $@"
-                    SELECT TOP 1 WatermarkEndTimeUtc FROM EtlExecutionLog
+                    SELECT TOP 1 WatermarkEndTimeUtc FROM __ETLExecutionLog
                     WHERE SourceCollectionName = '{sourceCollectionName}' AND Status = 'Succeeded'
                     ORDER BY ExecutionStartTimeUtc DESC";
                 var result = SqlTask.ExecuteScalar(connectionManager, sql);
@@ -34,7 +34,7 @@ namespace MongoToSqlEtl
                     return lastRun;
                 }
             }
-            catch (Exception ex) { Log.Warning(ex, "[LogManager] Could not query EtlExecutionLog table."); }
+            catch (Exception ex) { Log.Warning(ex, "[LogManager] Could not query __ETLExecutionLog table."); }
             Log.Information("[LogManager] No watermark found, using default: {DefaultDate}", DefaultStartDate);
             return DefaultStartDate;
         }
@@ -42,7 +42,7 @@ namespace MongoToSqlEtl
         public int StartNewLogEntry(DateTime watermarkStart, DateTime watermarkEnd)
         {
             var sql = $@"
-                INSERT INTO EtlExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkStartTimeUtc, WatermarkEndTimeUtc, Status)
+                INSERT INTO __ETLExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkStartTimeUtc, WatermarkEndTimeUtc, Status)
                 VALUES ('{sourceCollectionName}', GETUTCDATE(), '{watermarkStart:o}', '{watermarkEnd:o}', 'Started');
                 SELECT SCOPE_IDENTITY();";
             var logId = Convert.ToInt32(SqlTask.ExecuteScalar(connectionManager, sql));
@@ -52,7 +52,7 @@ namespace MongoToSqlEtl
 
         public void UpdateLogEntryOnSuccess(int logId, long sourceCount, long successCount, long failedCount)
         {
-            var sql = $@"UPDATE EtlExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Succeeded',
+            var sql = $@"UPDATE __ETLExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Succeeded',
                 SourceRecordCount = {sourceCount}, SuccessRecordCount = {successCount}, FailedRecordCount = {failedCount}, ErrorMessage = NULL
                 WHERE Id = {logId};";
             SqlTask.ExecuteNonQuery(connectionManager, sql);
@@ -62,7 +62,7 @@ namespace MongoToSqlEtl
         public void UpdateLogEntryOnFailure(int logId, string errorMessage)
         {
             var sanitizedErrorMessage = errorMessage.Replace("'", "''");
-            var sql = $@"UPDATE EtlExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Failed', ErrorMessage = '{sanitizedErrorMessage}'
+            var sql = $@"UPDATE __ETLExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Failed', ErrorMessage = '{sanitizedErrorMessage}'
                 WHERE Id = {logId};";
             SqlTask.ExecuteNonQuery(connectionManager, sql);
             Log.Error("[LogManager] Updated log entry ID: {LogId} to 'Failed'.", logId);
@@ -76,7 +76,7 @@ namespace MongoToSqlEtl
             var ids = new List<string>();
             try
             {
-                var sql = $"SELECT FailedRecordId FROM EtlFailedRecords WHERE SourceCollectionName = '{sourceCollectionName}' AND Status = 'Pending'";
+                var sql = $"SELECT FailedRecordId FROM __ETLFailedRecords WHERE SourceCollectionName = '{sourceCollectionName}' AND Status = 'Pending'";
                 var task = new SqlTask(sql)
                 {
                     ConnectionManager = connectionManager,
@@ -93,7 +93,7 @@ namespace MongoToSqlEtl
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "[FailedManager] Could not query EtlFailedRecords table.");
+                Log.Warning(ex, "[FailedManager] Could not query ETLFailedRecords table.");
             }
             return ids;
         }
@@ -102,7 +102,7 @@ namespace MongoToSqlEtl
         {
             var sanitizedErrorMessage = errorMessage.Replace("'", "''");
             var sql = $@"
-                MERGE EtlFailedRecords AS target
+                MERGE __ETLFailedRecords AS target
                 USING (SELECT '{sourceCollectionName}' AS SourceCollectionName, '{recordId}' AS FailedRecordId) AS source
                 ON (target.SourceCollectionName = source.SourceCollectionName AND target.FailedRecordId = source.FailedRecordId)
                 WHEN MATCHED THEN
@@ -127,7 +127,7 @@ namespace MongoToSqlEtl
 
             var formattedIds = string.Join(",", recordIds.Select(id => $"'{id}'"));
             var sql = $@"
-                UPDATE EtlFailedRecords
+                UPDATE __ETLFailedRecords
                 SET Status = 'Resolved',
                     ResolvedAtUtc = GETUTCDATE()
                 WHERE SourceCollectionName = '{sourceCollectionName}'
