@@ -299,21 +299,22 @@ namespace MongoToSqlEtl
                     // Helper function to process a single record dictionary
                     void ProcessSingleRecord(IDictionary<string, object?> recordDict)
                     {
-                        string recordId = "UNKNOWN";
+                        string? recordId = null;
+
                         if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
                         {
-                            recordId = idValue.ToString()?? "UNKNOWN";
+                            recordId = idValue.ToString();
                         }
 
-                        Log.Warning(exception, "Lỗi Dòng Dữ Liệu. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
-
-                        if (recordId != "UNKNOWN")
+                        // Check for invalid ID representations, including "[]" for empty collections.
+                        if (string.IsNullOrEmpty(recordId) || recordId == "[]")
                         {
-                            failedRecordManager.LogFailedRecord(recordId, exception.ToString());
+                            Log.Warning(exception, "Không tìm thấy ID hợp lệ trong bản ghi lỗi để ghi nhận. Data: {@ErrorRecord}", recordDict);
                         }
                         else
                         {
-                            Log.Error("Không thể ghi nhận bản ghi lỗi vào DB vì không tìm thấy ID hợp lệ. Data: {@ErrorRecord}", recordDict);
+                            Log.Warning(exception, "Lỗi Dòng Dữ Liệu. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+                            failedRecordManager.LogFailedRecord(recordId, exception.ToString());
                         }
                     }
 
