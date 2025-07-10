@@ -5,6 +5,7 @@ using ETLBox.MongoDb;
 using ETLBox.SqlServer;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using Serilog;
 using System.Collections;
 using System.Dynamic;
 using System.Text.Json;
@@ -13,10 +14,38 @@ namespace MongoToSqlEtl
 {
     public class Program
     {
-        public static async Task Main(string[] args)
+        public static async Task Main()
         {
-            ArgumentNullException.ThrowIfNull(args);
+            // STEP 1: Cấu hình Serilog
+            Log.Logger = new LoggerConfiguration()
+                .MinimumLevel.Debug()
+                .Enrich.FromLogContext()
+                .WriteTo.Console()
+                .WriteTo.File("logs/etl-log-.txt",
+                    rollingInterval: RollingInterval.Day,
+                    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+                .CreateLogger();
 
+            try
+            {
+                Log.Information("--- BẮT ĐẦU PHIÊN LÀM VIỆC ETL ---");
+                await RunEtlProcess();
+                Log.Information("--- KẾT THÚC PHIÊN LÀM VIỆC ETL THÀNH CÔNG ---");
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "Ứng dụng ETL đã gặp lỗi nghiêm trọng và bị dừng lại.");
+                // Ném lại lỗi để trả về một exit code khác 0, báo hiệu cho hệ thống bên ngoài là đã có lỗi.
+                throw;
+            }
+            finally
+            {
+                await Log.CloseAndFlushAsync();
+            }
+        }
+
+        private static async Task RunEtlProcess()
+        {
             // 1. Cấu hình và kết nối
             var config = LoadConfiguration();
             var sqlConnectionManager = CreateSqlConnectionManager(config);
@@ -26,20 +55,16 @@ namespace MongoToSqlEtl
             var patientordersDef = TableDefinition.FromTableName(sqlConnectionManager, "patientorders");
             var patientorderitemsDef = TableDefinition.FromTableName(sqlConnectionManager, "patientorderitems");
             var dispensebatchdetailDef = TableDefinition.FromTableName(sqlConnectionManager, "dispensebatchdetail");
-            var patientordersColumns = new HashSet<string>(patientordersDef.Columns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
-            var patientorderitemsColumns = new HashSet<string>(patientorderitemsDef.Columns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
-            var dispensebatchdetailColumns = new HashSet<string>(dispensebatchdetailDef.Columns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
 
             // 3. Khởi tạo các thành phần ETL
             var source = CreateMongoDbSource(mongoClient);
+            var logErrors = CreateErrorLoggingDestination(); // Destination để ghi log lỗi
 
             // Các bước transformation
-            var transformPatientOrders = CreateTransformComponent(patientordersColumns);
-            // Hàm này sẽ làm phẳng và chuẩn hóa kiểu dữ liệu cho items
+            var transformPatientOrders = CreateTransformComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
             var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems();
-            // Hàm này chỉ chọn các cột cần thiết cho SQL
-            var transformOrderItemForSql = CreateTransformComponent(patientorderitemsColumns);
-            var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation(dispensebatchdetailColumns);
+            var transformOrderItemForSql = CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
+            var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
             // Destinations
             var destPatientOrders = CreateDbMergeDestination(sqlConnectionManager, "patientorders");
@@ -47,11 +72,12 @@ namespace MongoToSqlEtl
             var destDispenseBatchDetail = CreateDbMergeDestination(sqlConnectionManager, "dispensebatchdetail");
 
             // 4. Xây dựng và liên kết pipeline
-            BuildAndLinkPipeline(source, transformPatientOrders, flattenAndNormalizeOrderItems, transformOrderItemForSql, flattenDispenseBatchDetails, destPatientOrders, destPatientOrderItems, destDispenseBatchDetail);
+            BuildAndLinkPipeline(source, logErrors, transformPatientOrders, flattenAndNormalizeOrderItems, transformOrderItemForSql, flattenDispenseBatchDetails, destPatientOrders, destPatientOrderItems, destDispenseBatchDetail);
 
-            Console.WriteLine("Starting ETL process...");
+            // 5. Thực thi
+            Log.Information("Bắt đầu thực thi Network...");
             await Network.ExecuteAsync(source);
-            Console.WriteLine("Completed.");
+            Log.Information("Network đã thực thi xong.");
         }
 
         #region STEP 1: Configuration and Connection Setup
@@ -73,6 +99,7 @@ namespace MongoToSqlEtl
         {
             var startDate = DateTime.Now.AddHours(-3);
             var filter = Builders<BsonDocument>.Filter.Gte("modifiedat", startDate);
+            Log.Information("Lấy dữ liệu từ MongoDB được chỉnh sửa sau: {StartDate}", startDate);
             return new MongoDbSource<ExpandoObject> { DbClient = client, DatabaseName = "arcusairdb", CollectionName = "patientorders", Filter = filter, FindOptions = new FindOptions { BatchSize = 500 } };
         }
 
@@ -95,13 +122,24 @@ namespace MongoToSqlEtl
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols));
         }
+
+        private static CustomDestination<ETLBoxError> CreateErrorLoggingDestination()
+        {
+            return new CustomDestination<ETLBoxError>
+            {
+                WriteAction = (error, rowIndex) =>
+                {
+                    Log.Warning("Lỗi Dòng Dữ Liệu: {@ErrorRecord}. Nguyên nhân: {ErrorMessage}", error.RecordAsJson, error.GetException().Message);
+                }
+            };
+        }
+
         #endregion
 
         #region STEP 3: Transformation Logic
         private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
-            // Chuyển đổi _id của cha thành string trước khi dùng làm khóa ngoại
             if (parentAsDict.TryGetValue("_id", out var parentId) && parentId is ObjectId poid)
             {
                 parentAsDict["_id"] = poid.ToString();
@@ -112,20 +150,14 @@ namespace MongoToSqlEtl
                 foreach (object? sourceItem in orderItems)
                 {
                     if (sourceItem == null) continue;
-
                     var newItem = new ExpandoObject();
                     var newItemDict = (IDictionary<string, object?>)newItem;
                     var sourceItemDict = (IDictionary<string, object?>)sourceItem;
-
-                    // Lặp qua tất cả các key của item nguồn để chuẩn hóa dữ liệu
                     foreach (var key in sourceItemDict.Keys)
                     {
                         MapProperty(sourceItemDict, newItemDict, key);
                     }
-
-                    // Thêm khóa ngoại đã được chuẩn hóa
                     newItemDict["patientordersuid"] = parentAsDict["_id"];
-
                     yield return newItem;
                 }
             }
@@ -135,14 +167,12 @@ namespace MongoToSqlEtl
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
             var targetDict = (IDictionary<string, object?>)new ExpandoObject();
-
             foreach (var columnName in targetColumns)
             {
                 MapProperty(sourceAsDict, targetDict, columnName);
             }
             if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id")) MapProperty(sourceAsDict, targetDict, "_id");
             if (sourceAsDict.ContainsKey("patientordersuid") && !targetDict.ContainsKey("patientordersuid")) MapProperty(sourceAsDict, targetDict, "patientordersuid");
-
             return (ExpandoObject)targetDict;
         }
 
@@ -175,14 +205,8 @@ namespace MongoToSqlEtl
                 else if (value is ObjectId oid) { target[key] = oid.ToString(); }
                 else if (value is IEnumerable && value is not string)
                 {
-                    if (key == "dispensebatchdetail")
-                    {
-                        target[key] = value;
-                    }
-                    else
-                    {
-                        target[key] = JsonSerializer.Serialize(value);
-                    }
+                    if (key == "dispensebatchdetail") { target[key] = value; }
+                    else { target[key] = JsonSerializer.Serialize(value); }
                 }
                 else { target[key] = value; }
             }
@@ -193,6 +217,7 @@ namespace MongoToSqlEtl
         #region STEP 4: Pipeline Linking
         private static void BuildAndLinkPipeline(
             MongoDbSource<ExpandoObject> source,
+            CustomDestination<ETLBoxError> logErrors,
             RowTransformation<ExpandoObject> transformPatientOrders,
             RowMultiplication<ExpandoObject, ExpandoObject> flattenAndNormalizeOrderItems,
             RowTransformation<ExpandoObject> transformOrderItemForSql,
@@ -204,26 +229,28 @@ namespace MongoToSqlEtl
             var multicastOrders = new Multicast<ExpandoObject>();
             var multicastNormalizedItems = new Multicast<ExpandoObject>();
 
-            // 1. Chia luồng source
             source.LinkTo(multicastOrders);
+            source.LinkErrorTo(logErrors);
 
-            // 2. Nhánh 1: Biến đổi và lưu patientorders
             multicastOrders.LinkTo(transformPatientOrders);
             transformPatientOrders.LinkTo(destPatientOrders);
+            transformPatientOrders.LinkErrorTo(logErrors);
+            destPatientOrders.LinkErrorTo(logErrors);
 
-            // 3. Nhánh 2: Làm phẳng và chuẩn hóa kiểu dữ liệu cho patientorderitems
             multicastOrders.LinkTo(flattenAndNormalizeOrderItems);
+            flattenAndNormalizeOrderItems.LinkErrorTo(logErrors);
 
-            // 4. Chia luồng item đã được chuẩn hóa
             flattenAndNormalizeOrderItems.LinkTo(multicastNormalizedItems);
 
-            // 5. Nhánh 2a: Chỉ chọn các cột cần thiết cho SQL và lưu
             multicastNormalizedItems.LinkTo(transformOrderItemForSql);
             transformOrderItemForSql.LinkTo(destPatientOrderItems);
+            transformOrderItemForSql.LinkErrorTo(logErrors);
+            destPatientOrderItems.LinkErrorTo(logErrors);
 
-            // 6. Nhánh 2b: Dùng item đã chuẩn hóa để làm phẳng lớp 3
             multicastNormalizedItems.LinkTo(flattenDispenseBatchDetails);
             flattenDispenseBatchDetails.LinkTo(destDispenseBatchDetails);
+            flattenDispenseBatchDetails.LinkErrorTo(logErrors);
+            destDispenseBatchDetails.LinkErrorTo(logErrors);
         }
         #endregion
     }
