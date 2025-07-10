@@ -28,7 +28,8 @@ namespace MongoToSqlEtl
                 var result = SqlTask.ExecuteScalar(connectionManager, sql);
                 if (result != null && result != DBNull.Value)
                 {
-                    var lastRun = (DateTime)result;
+                    // CẬP NHẬT QUAN TRỌNG: Chỉ định rõ DateTime đọc từ DB là giờ UTC.
+                    var lastRun = DateTime.SpecifyKind((DateTime)result, DateTimeKind.Utc);
                     Log.Information("[LogManager] Found last successful watermark: {LastRun}", lastRun);
                     return lastRun;
                 }
@@ -240,24 +241,33 @@ namespace MongoToSqlEtl
         #region STEP 2: ETL Component Creation
         private static MongoDbSource<ExpandoObject> CreateMongoDbSource(MongoClient client, string collectionName, DateTime startDate, DateTime endDate, List<string> failedIds)
         {
+            // Filter for the new/updated data within the time window
             var watermarkFilter = Builders<BsonDocument>.Filter.And(
                 Builders<BsonDocument>.Filter.Gte("modifiedat", startDate),
                 Builders<BsonDocument>.Filter.Lt("modifiedat", endDate)
             );
 
-            var filters = new List<FilterDefinition<BsonDocument>> { watermarkFilter };
+            FilterDefinition<BsonDocument> finalFilter;
 
+            // If there are records to retry, create a more complex $or filter
             if (failedIds.Count != 0)
             {
+                Log.Information("Thêm {Count} bản ghi bị lỗi vào truy vấn nguồn.", failedIds.Count);
+
+                // Filter for the failed records
                 var objectIds = failedIds.Select(id => new ObjectId(id)).ToList();
                 var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
-                filters.Add(retryFilter);
-                Log.Information("Thêm {Count} bản ghi bị lỗi vào truy vấn nguồn.", failedIds.Count);
+
+                // Combine the filters: (new data) OR (failed data)
+                finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
+            }
+            else
+            {
+                // If there are no records to retry, use only the simple time window filter
+                finalFilter = watermarkFilter;
             }
 
-            var finalFilter = Builders<BsonDocument>.Filter.Or(filters);
-
-            Log.Information("Lấy dữ liệu từ MongoDB collection '{collection}' trong khoảng: [{StartDate}, {EndDate}) HOẶC có ID trong danh sách lỗi.", collectionName, startDate, endDate);
+            Log.Information("Lấy dữ liệu từ MongoDB collection '{collection}' trong khoảng: [{StartDate}, {EndDate}) và/hoặc các ID lỗi.", collectionName, startDate, endDate);
             return new MongoDbSource<ExpandoObject> { DbClient = client, DatabaseName = "arcusairdb", CollectionName = collectionName, Filter = finalFilter, FindOptions = new FindOptions { BatchSize = 500 } };
         }
 
