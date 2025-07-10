@@ -22,25 +22,28 @@ namespace MongoToSqlEtl.Common
             };
         }
 
-        public static RowTransformation<ExpandoObject> CreateTransformComponent(HashSet<string> targetColumns)
+        public static RowTransformation<ExpandoObject> CreateTransformComponent(HashSet<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
         {
-            return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns));
+            return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns, keepAsObjectFields));
         }
 
-        public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns)
+        public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
             var targetDict = (IDictionary<string, object?>)new ExpandoObject();
             foreach (var columnName in targetColumns)
             {
-                MapProperty(sourceAsDict, targetDict, columnName);
+                MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
             }
-            if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id")) MapProperty(sourceAsDict, targetDict, "_id");
-            if (sourceAsDict.ContainsKey("patientordersuid") && !targetDict.ContainsKey("patientordersuid")) MapProperty(sourceAsDict, targetDict, "patientordersuid");
+            // Luôn đảm bảo map cột _id nếu nó tồn tại trong nguồn (quan trọng cho DbMerge)
+            if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
+            {
+                MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
+            }
             return (ExpandoObject)targetDict;
         }
 
-        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key)
+        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
         {
             if (source.TryGetValue(key, out object? value))
             {
@@ -53,8 +56,15 @@ namespace MongoToSqlEtl.Common
                 else if (value is ObjectId oid) { target[key] = oid.ToString(); }
                 else if (value is IEnumerable && value is not string)
                 {
-                    if (key == "dispensebatchdetail") { target[key] = value; }
-                    else { target[key] = JsonSerializer.Serialize(value); }
+                    // Nếu key nằm trong danh sách cần giữ lại, không serialize nó.
+                    if (keepAsObjectFields != null && keepAsObjectFields.Contains(key))
+                    {
+                        target[key] = value;
+                    }
+                    else
+                    {
+                        target[key] = JsonSerializer.Serialize(value);
+                    }
                 }
                 else { target[key] = value; }
             }

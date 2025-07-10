@@ -34,9 +34,12 @@ namespace MongoToSqlEtl.Jobs
             var source = CreateMongoDbSource(startDate, endDate, failedIds);
             var logErrors = CreateErrorLoggingDestination();
 
+            // Cấu hình cụ thể cho job này
+            var itemFieldsToKeepAsObject = new HashSet<string> { "dispensebatchdetail" };
+
             // Tạo các component transformation
             var transformPatientOrders = DataTransformer.CreateTransformComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
-            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems();
+            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems(itemFieldsToKeepAsObject);
             var transformOrderItemForSql = DataTransformer.CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
@@ -82,9 +85,9 @@ namespace MongoToSqlEtl.Jobs
 
         #region Transformation Logic Specific to PatientOrders
 
-        private RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems()
+        private RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(FlattenAndNormalizeItems);
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, keepAsObjectFields));
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
@@ -92,7 +95,7 @@ namespace MongoToSqlEtl.Jobs
             return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols));
         }
 
-        private IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow)
+        private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow, HashSet<string> keepAsObjectFields)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
             if (parentAsDict.TryGetValue("_id", out var parentId) && parentId is ObjectId poid)
@@ -110,8 +113,9 @@ namespace MongoToSqlEtl.Jobs
                     var sourceItemDict = (IDictionary<string, object?>)sourceItem;
                     foreach (var key in sourceItemDict.Keys)
                     {
-                        DataTransformer.MapProperty(sourceItemDict, newItemDict, key);
+                        DataTransformer.MapProperty(sourceItemDict, newItemDict, key, keepAsObjectFields);
                     }
+                    // Logic nghiệp vụ cụ thể: Thêm khóa ngoại
                     newItemDict["patientordersuid"] = parentAsDict["_id"];
                     yield return newItem;
                 }
@@ -126,8 +130,10 @@ namespace MongoToSqlEtl.Jobs
                 foreach (object? detail in details)
                 {
                     if (detail == null) continue;
+                    // Ở cấp độ này, không có mảng con nào cần giữ lại, nên không cần truyền config
                     var targetDetail = DataTransformer.TransformObject((ExpandoObject)detail, cols);
                     var targetDict = (IDictionary<string, object?>)targetDetail;
+                    // Logic nghiệp vụ cụ thể: Thêm khóa ngoại
                     targetDict["patientorderitemsuid"] = poItemDict["_id"];
                     yield return targetDetail;
                 }
