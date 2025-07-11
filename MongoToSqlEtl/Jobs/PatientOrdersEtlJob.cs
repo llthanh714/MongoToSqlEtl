@@ -1,6 +1,8 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
+using Hangfire.Console;
+using Hangfire.Server;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
@@ -20,14 +22,21 @@ namespace MongoToSqlEtl.Jobs
         private const string DestPatientOrderItemsTable = "patientorderitems";
         private const string DestDispenseBatchDetailTable = "dispensebatchdetail";
 
-        protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds)
+        public new async Task RunAsync(PerformContext? context)
+        {
+            context?.WriteLine("Bắt đầu thực thi Job...");
+            await base.RunAsync(context);
+            context?.WriteLine("Job đã thực thi xong.");
+        }
+
+        protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context)
         {
             var patientordersDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrdersTable);
             var patientorderitemsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrderItemsTable);
             var dispensebatchdetailDef = TableDefinition.FromTableName(SqlConnectionManager, DestDispenseBatchDetailTable);
 
             var source = CreateMongoDbSource(startDate, endDate, failedIds);
-            var logErrors = CreateErrorLoggingDestination();
+            var logErrors = CreateErrorLoggingDestination(context);
 
             var itemFieldsToKeepAsObject = new HashSet<string> { "dispensebatchdetail" };
 

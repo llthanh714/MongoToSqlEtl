@@ -1,6 +1,8 @@
 ﻿using ETLBox;
 using ETLBox.DataFlow;
 using ETLBox.MongoDb;
+using Hangfire.Console;
+using Hangfire.Server;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoToSqlEtl.Managers;
@@ -31,9 +33,10 @@ namespace MongoToSqlEtl.Jobs
             FailedRecordManager = new EtlFailedRecordManager(sqlConnectionManager, SourceCollectionName);
         }
 
-        protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds);
+        protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context);
 
-        public async Task RunAsync()
+        // CẬP NHẬT: Thêm tham số PerformContext
+        public async Task RunAsync(PerformContext? context)
         {
             int logId = 0;
             List<string> pendingFailedRecordIds = [];
@@ -46,16 +49,21 @@ namespace MongoToSqlEtl.Jobs
 
                 logId = LogManager.StartNewLogEntry(lastSuccessfulRun, currentRunStartTime);
 
-                var pipeline = BuildPipeline(lastSuccessfulRun, currentRunStartTime, pendingFailedRecordIds);
+                var pipeline = BuildPipeline(lastSuccessfulRun, currentRunStartTime, pendingFailedRecordIds, context);
 
+                context?.WriteLine($"Bắt đầu thực thi Network cho job '{SourceCollectionName}'...");
                 Log.Information("Bắt đầu thực thi Network cho job '{JobName}'...", SourceCollectionName);
+
                 await Network.ExecuteAsync(pipeline.Source);
+
+                context?.WriteLine("Network đã thực thi xong.");
                 Log.Information("Network đã thực thi xong cho job '{JobName}'.", SourceCollectionName);
 
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
                 long failedCount = pipeline.ErrorDestination.ProgressCount;
 
+                context?.WriteLine($"Thống kê: Nguồn={totalSourceCount}, Thành công={successCount}, Lỗi={failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
                 if (pendingFailedRecordIds.Count != 0)
@@ -65,11 +73,16 @@ namespace MongoToSqlEtl.Jobs
             }
             catch (Exception ex)
             {
+                context?.SetTextColor(ConsoleTextColor.Red);
+                context?.WriteLine($"Job '{SourceCollectionName}' đã thất bại với lỗi nghiêm trọng.");
+                context?.WriteLine(ex.ToString());
+                context?.ResetTextColor();
+
                 if (logId > 0)
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
                 }
-                throw new Exception($"Job '{SourceCollectionName}' failed.", ex);
+                throw; // Ném lại lỗi để Hangfire đánh dấu job là 'Failed'
             }
         }
 
@@ -107,7 +120,8 @@ namespace MongoToSqlEtl.Jobs
             };
         }
 
-        protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination()
+        // CẬP NHẬT: Thêm tham số PerformContext
+        protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
             return new CustomDestination<ETLBoxError>
             {
@@ -136,9 +150,11 @@ namespace MongoToSqlEtl.Jobs
                         }
                         else
                         {
+                            // Ghi log vào cả Serilog và Hangfire Dashboard
+                            context?.WriteLine($"Lỗi dòng dữ liệu. ID: {recordId}. Lỗi: {exception.Message}");
                             Log.Warning(exception, "Lỗi Dòng Dữ Liệu. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+
                             FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-                            // Send notification for single record error
                             NotificationService.SendRecordErrorAsync(SourceCollectionName, recordId, exception).GetAwaiter().GetResult();
                         }
                     }
@@ -148,27 +164,16 @@ namespace MongoToSqlEtl.Jobs
                         using var jsonDoc = JsonDocument.Parse(json);
                         if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
                         {
-                            Log.Warning(exception, "Lỗi xảy ra trên một batch dữ liệu. Chi tiết batch: {Json}", json);
                             var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
                             if (records != null)
                             {
-                                foreach (var record in records)
-                                {
-                                    ProcessSingleRecord(record);
-                                }
+                                foreach (var record in records) ProcessSingleRecord(record);
                             }
                         }
                         else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
                         {
                             var record = JsonSerializer.Deserialize<ExpandoObject>(json);
-                            if (record != null)
-                            {
-                                ProcessSingleRecord(record);
-                            }
-                        }
-                        else
-                        {
-                            Log.Error(exception, "Dữ liệu lỗi không phải là một đối tượng JSON hoặc mảng. Raw JSON: {Json}", json);
+                            if (record != null) ProcessSingleRecord(record);
                         }
                     }
                     catch (JsonException ex)
