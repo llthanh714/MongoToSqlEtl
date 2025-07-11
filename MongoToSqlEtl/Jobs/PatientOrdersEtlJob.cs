@@ -4,6 +4,7 @@ using ETLBox.DataFlow;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
+using MongoToSqlEtl.Services;
 using System.Dynamic;
 
 namespace MongoToSqlEtl.Jobs
@@ -11,44 +12,34 @@ namespace MongoToSqlEtl.Jobs
     /// <summary>
     /// Lớp triển khai cụ thể cho việc ETL collection 'patientorders'.
     /// </summary>
-    public class PatientOrdersEtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient) : EtlJob(sqlConnectionManager, mongoClient)
+    public class PatientOrdersEtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService) : EtlJob(sqlConnectionManager, mongoClient, notificationService)
     {
-        // Định nghĩa các hằng số cho tên collection và bảng
         protected override string SourceCollectionName => "patientorders";
         protected override string MongoDatabaseName => "arcusairdb";
         private const string DestPatientOrdersTable = "patientorders";
         private const string DestPatientOrderItemsTable = "patientorderitems";
         private const string DestDispenseBatchDetailTable = "dispensebatchdetail";
 
-        /// <summary>
-        /// Triển khai việc xây dựng và liên kết pipeline cho 'patientorders'.
-        /// </summary>
         protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds)
         {
-            // Lấy schema bảng đích
             var patientordersDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrdersTable);
             var patientorderitemsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrderItemsTable);
             var dispensebatchdetailDef = TableDefinition.FromTableName(SqlConnectionManager, DestDispenseBatchDetailTable);
 
-            // Tạo các component của pipeline
             var source = CreateMongoDbSource(startDate, endDate, failedIds);
             var logErrors = CreateErrorLoggingDestination();
 
-            // Cấu hình cụ thể cho job này
             var itemFieldsToKeepAsObject = new HashSet<string> { "dispensebatchdetail" };
 
-            // Tạo các component transformation
             var transformPatientOrders = DataTransformer.CreateTransformComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
             var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems(itemFieldsToKeepAsObject);
             var transformOrderItemForSql = DataTransformer.CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
-            // Tạo các component destination
             var destPatientOrders = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrdersTable);
             var destPatientOrderItems = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrderItemsTable);
             var destDispenseBatchDetail = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestDispenseBatchDetailTable);
 
-            // Liên kết pipeline
             var multicastOrders = new Multicast<ExpandoObject>();
             var multicastNormalizedItems = new Multicast<ExpandoObject>();
 
@@ -75,7 +66,6 @@ namespace MongoToSqlEtl.Jobs
             flattenDispenseBatchDetails.LinkErrorTo(logErrors);
             destDispenseBatchDetail.LinkErrorTo(logErrors);
 
-            // Trả về các component chính của pipeline để lớp cơ sở có thể theo dõi
             return new EtlPipeline(
                 Source: source,
                 Destinations: [destPatientOrders, destPatientOrderItems, destDispenseBatchDetail],
@@ -85,7 +75,7 @@ namespace MongoToSqlEtl.Jobs
 
         #region Transformation Logic Specific to PatientOrders
 
-        private RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, keepAsObjectFields));
         }
@@ -115,7 +105,6 @@ namespace MongoToSqlEtl.Jobs
                     {
                         DataTransformer.MapProperty(sourceItemDict, newItemDict, key, keepAsObjectFields);
                     }
-                    // Logic nghiệp vụ cụ thể: Thêm khóa ngoại
                     newItemDict["patientordersuid"] = parentAsDict["_id"];
                     yield return newItem;
                 }
@@ -130,10 +119,8 @@ namespace MongoToSqlEtl.Jobs
                 foreach (object? detail in details)
                 {
                     if (detail == null) continue;
-                    // Ở cấp độ này, không có mảng con nào cần giữ lại, nên không cần truyền config
                     var targetDetail = DataTransformer.TransformObject((ExpandoObject)detail, cols);
                     var targetDict = (IDictionary<string, object?>)targetDetail;
-                    // Logic nghiệp vụ cụ thể: Thêm khóa ngoại
                     targetDict["patientorderitemsuid"] = poItemDict["_id"];
                     yield return targetDetail;
                 }

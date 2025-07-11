@@ -1,6 +1,7 @@
 ﻿using ETLBox.SqlServer;
 using MongoDB.Driver;
 using MongoToSqlEtl.Jobs;
+using MongoToSqlEtl.Services;
 using Serilog;
 
 namespace MongoToSqlEtl
@@ -9,32 +10,33 @@ namespace MongoToSqlEtl
     {
         public static async Task Main()
         {
-            // 1. Cấu hình Serilog
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Debug().Enrich.FromLogContext().WriteTo.Console()
-                .WriteTo.File("logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
+                .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
                     outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
                 .CreateLogger();
 
+            IConfiguration config = LoadConfiguration();
+            SlackNotificationService notificationService = new(config["NotificationSettings:SlackWebhookUrl"]);
+            string jobName = "PatientOrdersETL"; // Define a name for the job
+
             try
             {
-                Log.Information("--- BẮT ĐẦU PHIÊN LÀM VIỆC ETL ---");
+                Log.Information("--- BẮT ĐẦU PHIÊN LÀM VIỆC ETL CHO JOB: {JobName} ---", jobName);
 
-                // 2. Tải cấu hình và tạo kết nối
-                var config = LoadConfiguration();
                 var sqlConnectionManager = CreateSqlConnectionManager(config);
                 var mongoClient = CreateMongoDbClient(config);
 
-                // 3. Khởi tạo và thực thi Job ETL cụ thể
-                var patientOrdersJob = new PatientOrdersEtlJob(sqlConnectionManager, mongoClient);
+                var patientOrdersJob = new PatientOrdersEtlJob(sqlConnectionManager, mongoClient, notificationService);
                 await patientOrdersJob.RunAsync();
 
-                Log.Information("--- KẾT THÚC PHIÊN LÀM VIỆC ETL THÀNH CÔNG ---");
+                Log.Information("--- KẾT THÚC PHIÊN LÀM VIỆC ETL THÀNH CÔNG CHO JOB: {JobName} ---", jobName);
             }
             catch (Exception ex)
             {
-                Log.Fatal(ex, "Ứng dụng ETL đã gặp lỗi nghiêm trọng và bị dừng lại.");
-                throw; // Ném lại lỗi để có exit code khác 0
+                Log.Fatal(ex, "Ứng dụng ETL đã gặp lỗi nghiêm trọng và bị dừng lại cho job: {JobName}", jobName);
+                await notificationService.SendFatalErrorAsync(jobName, ex);
+                throw;
             }
             finally
             {
