@@ -2,7 +2,6 @@
 using ETLBox.SqlServer;
 using Hangfire;
 using Hangfire.Console;
-using Hangfire.Dashboard;
 using Hangfire.Dashboard.BasicAuthorization;
 using Hangfire.SqlServer;
 using MongoDB.Driver;
@@ -28,12 +27,16 @@ try
     // Kiểm tra và lấy mật khẩu từ biến môi trường
     var sqlPassword = Environment.GetEnvironmentVariable("__DB_PASSWORD__", EnvironmentVariableTarget.Machine);
     var mongoPassword = Environment.GetEnvironmentVariable("__MONGOGDB_PASSWORD__", EnvironmentVariableTarget.Machine);
+    var hangfireDashboardPassword = Environment.GetEnvironmentVariable("__HANGFIRE_DASHBOARD_PASSWORD__", EnvironmentVariableTarget.Machine);
 
     if (string.IsNullOrWhiteSpace(sqlPassword))
         throw new Exception("__DB_PASSWORD__ environment variable is not set.");
 
     if (string.IsNullOrWhiteSpace(mongoPassword))
         throw new Exception("__MONGOGDB_PASSWORD__ environment variable is not set.");
+
+    if (string.IsNullOrWhiteSpace(hangfireDashboardPassword))
+        throw new Exception("__HANGFIRE_DASHBOARD_PASSWORD__ environment variable is not set.");
 
     // --- STEP 2: Tích hợp Serilog vào ASP.NET Core ---
     builder.Host.UseSerilog();
@@ -110,7 +113,7 @@ try
                     new BasicAuthAuthorizationUser
                     {
                         Login = "admin",
-                        PasswordClear = "123567899"
+                        PasswordClear = hangfireDashboardPassword
                     }
                 ]
             })
