@@ -6,7 +6,7 @@ namespace MongoToSqlEtl.Managers
 {
     public class EtlLogManager(IConnectionManager connectionManager, string sourceCollectionName)
     {
-        private static readonly DateTime DefaultStartDate = new(2025, 7, 11, 1, 0, 0, DateTimeKind.Utc);
+        private static readonly DateTime DefaultStartDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         public DateTime GetLastSuccessfulWatermark()
         {

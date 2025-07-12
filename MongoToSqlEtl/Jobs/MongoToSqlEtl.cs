@@ -21,8 +21,12 @@ namespace MongoToSqlEtl.Jobs
         protected readonly EtlLogManager LogManager;
         protected readonly EtlFailedRecordManager FailedRecordManager;
 
+        // Các thuộc tính trừu tượng mà lớp con phải định nghĩa
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
+
+        // Cấu hình khoảng thời gian xử lý tối đa cho mỗi lần chạy (tính bằng phút)
+        protected virtual int MaxBatchIntervalInMinutes => 30; // In minutes
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -35,7 +39,6 @@ namespace MongoToSqlEtl.Jobs
 
         protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context);
 
-        // CẬP NHẬT: Thêm tham số PerformContext
         public async Task RunAsync(PerformContext? context)
         {
             int logId = 0;
@@ -43,27 +46,43 @@ namespace MongoToSqlEtl.Jobs
 
             try
             {
-                var currentRunStartTime = DateTime.UtcNow;
+                var now = DateTime.UtcNow;
                 var lastSuccessfulRun = LogManager.GetLastSuccessfulWatermark();
+
+                // --- LOGIC MỚI: Xác định khoảng thời gian xử lý ---
+                var potentialEndDate = lastSuccessfulRun.AddMinutes(MaxBatchIntervalInMinutes);
+                var endDate = potentialEndDate < now ? potentialEndDate : now;
+
+                // Kiểm tra an toàn: Nếu không có khoảng thời gian mới để xử lý, bỏ qua lần chạy này.
+                if (endDate <= lastSuccessfulRun)
+                {
+                    var message = $"No new time window to process (end time <= start time). Skipping this run.";
+                    context?.WriteLine(message);
+                    Log.Information("[{JobName}] {Message}", SourceCollectionName, message);
+                    return;
+                }
+                // --- KẾT THÚC LOGIC MỚI ---
+
                 pendingFailedRecordIds = FailedRecordManager.GetPendingFailedRecordIds();
 
-                logId = LogManager.StartNewLogEntry(lastSuccessfulRun, currentRunStartTime);
+                // Ghi log với khoảng thời gian thực tế sẽ được xử lý
+                logId = LogManager.StartNewLogEntry(lastSuccessfulRun, endDate);
 
-                var pipeline = BuildPipeline(lastSuccessfulRun, currentRunStartTime, pendingFailedRecordIds, context);
+                var pipeline = BuildPipeline(lastSuccessfulRun, endDate, pendingFailedRecordIds, context);
 
-                context?.WriteLine($"Starting Network execution for the job '{SourceCollectionName}'...");
+                context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}'...");
                 Log.Information("Starting Network execution for job '{JobName}'...", SourceCollectionName);
 
                 await Network.ExecuteAsync(pipeline.Source);
 
-                context?.WriteLine("The network execution is complete.");
-                Log.Information("The network has finished executing for the job '{JobName}'.", SourceCollectionName);
+                context?.WriteLine("Network execution has finished.");
+                Log.Information("Network execution finished for job '{JobName}'.", SourceCollectionName);
 
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
                 long failedCount = pipeline.ErrorDestination.ProgressCount;
 
-                context?.WriteLine($"Summary --> Sources: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
+                context?.WriteLine($"Summary -- Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
                 if (pendingFailedRecordIds.Count != 0)
@@ -97,7 +116,7 @@ namespace MongoToSqlEtl.Jobs
 
             if (failedIds.Count != 0)
             {
-                Log.Information("[{JobName}] Added {Count} failed records to the source query.", SourceCollectionName, failedIds.Count);
+                Log.Information("[{JobName}] Adding {Count} failed records to the source query.", SourceCollectionName, failedIds.Count);
                 var objectIds = failedIds.Select(id => new ObjectId(id)).ToList();
                 var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
                 finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
@@ -107,7 +126,7 @@ namespace MongoToSqlEtl.Jobs
                 finalFilter = watermarkFilter;
             }
 
-            Log.Information("[{JobName}] Retrieving data from collection '{collection}' in the range: [{StartDate}, {EndDate}) and/or by error IDs.",
+            Log.Information("[{JobName}] Fetching data from collection '{collection}' for time range: [{StartDate}, {EndDate}) and/or failed IDs.",
                 SourceCollectionName, MongoDatabaseName, startDate, endDate);
 
             return new MongoDbSource<ExpandoObject>
@@ -120,7 +139,6 @@ namespace MongoToSqlEtl.Jobs
             };
         }
 
-        // CẬP NHẬT: Thêm tham số PerformContext
         protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
             return new CustomDestination<ETLBoxError>
@@ -132,7 +150,7 @@ namespace MongoToSqlEtl.Jobs
 
                     if (string.IsNullOrEmpty(json))
                     {
-                        Log.Error(exception, "RecordAsJson is missing or contains no data.");
+                        Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
                         return;
                     }
 
@@ -146,13 +164,12 @@ namespace MongoToSqlEtl.Jobs
 
                         if (string.IsNullOrEmpty(recordId) || recordId == "[]")
                         {
-                            Log.Warning(exception, "No valid identifier detected in the error record for tracking. Data: {@ErrorRecord}", recordDict);
+                            Log.Warning(exception, "Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
                         }
                         else
                         {
-                            // Ghi log vào cả Serilog và Hangfire Dashboard
-                            context?.WriteLine($"Error in data row. ID: {recordId}. Details: {exception.Message}");
-                            Log.Warning(exception, "Record Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+                            context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
+                            Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
 
                             FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
                             NotificationService.SendRecordErrorAsync(SourceCollectionName, recordId, exception).GetAwaiter().GetResult();
@@ -164,6 +181,7 @@ namespace MongoToSqlEtl.Jobs
                         using var jsonDoc = JsonDocument.Parse(json);
                         if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
                         {
+                            Log.Warning(exception, "Error occurred on a data batch. Batch details: {Json}", json);
                             var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
                             if (records != null)
                             {
@@ -178,7 +196,7 @@ namespace MongoToSqlEtl.Jobs
                     }
                     catch (JsonException ex)
                     {
-                        Log.Error(ex, "Unable to parse error data from JSON. Raw JSON: {Json}", json);
+                        Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", json);
                     }
                 }
             };
