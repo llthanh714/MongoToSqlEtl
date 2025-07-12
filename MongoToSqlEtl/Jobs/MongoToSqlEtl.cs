@@ -25,7 +25,7 @@ namespace MongoToSqlEtl.Jobs
         protected List<string> CurrentRunFailedIds { get; } = [];
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 5;
+        protected virtual int MaxBatchIntervalInMinutes => 30;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -101,6 +101,7 @@ namespace MongoToSqlEtl.Jobs
                 if (logId > 0)
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
+                    await NotificationService.SendFatalErrorAsync(SourceCollectionName, ex);
                 }
                 throw;
             }
