@@ -21,12 +21,11 @@ namespace MongoToSqlEtl.Jobs
         protected readonly EtlLogManager LogManager;
         protected readonly EtlFailedRecordManager FailedRecordManager;
 
-        // Các thuộc tính trừu tượng mà lớp con phải định nghĩa
+        // Danh sách để thu thập các ID bị lỗi trong lần chạy hiện tại
+        protected List<string> CurrentRunFailedIds { get; } = [];
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-
-        // Cấu hình khoảng thời gian xử lý tối đa cho mỗi lần chạy (tính bằng phút)
-        protected virtual int MaxBatchIntervalInMinutes => 30; // In minutes
+        protected virtual int MaxBatchIntervalInMinutes => 5;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -43,17 +42,16 @@ namespace MongoToSqlEtl.Jobs
         {
             int logId = 0;
             List<string> pendingFailedRecordIds = [];
+            CurrentRunFailedIds.Clear(); // Xóa danh sách lỗi của lần chạy trước
 
             try
             {
                 var now = DateTime.UtcNow;
                 var lastSuccessfulRun = LogManager.GetLastSuccessfulWatermark();
 
-                // --- LOGIC MỚI: Xác định khoảng thời gian xử lý ---
                 var potentialEndDate = lastSuccessfulRun.AddMinutes(MaxBatchIntervalInMinutes);
                 var endDate = potentialEndDate < now ? potentialEndDate : now;
 
-                // Kiểm tra an toàn: Nếu không có khoảng thời gian mới để xử lý, bỏ qua lần chạy này.
                 if (endDate <= lastSuccessfulRun)
                 {
                     var message = $"No new time window to process (end time <= start time). Skipping this run.";
@@ -61,11 +59,8 @@ namespace MongoToSqlEtl.Jobs
                     Log.Information("[{JobName}] {Message}", SourceCollectionName, message);
                     return;
                 }
-                // --- KẾT THÚC LOGIC MỚI ---
 
                 pendingFailedRecordIds = FailedRecordManager.GetPendingFailedRecordIds();
-
-                // Ghi log với khoảng thời gian thực tế sẽ được xử lý
                 logId = LogManager.StartNewLogEntry(lastSuccessfulRun, endDate);
 
                 var pipeline = BuildPipeline(lastSuccessfulRun, endDate, pendingFailedRecordIds, context);
@@ -85,6 +80,12 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine($"Summary -- Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
+                // Gửi một thông báo tổng hợp nếu có lỗi
+                if (CurrentRunFailedIds.Count != 0)
+                {
+                    await NotificationService.SendFailedRecordsSummaryAsync(SourceCollectionName, CurrentRunFailedIds);
+                }
+
                 if (pendingFailedRecordIds.Count != 0)
                 {
                     FailedRecordManager.MarkRecordsAsResolved(pendingFailedRecordIds);
@@ -101,7 +102,7 @@ namespace MongoToSqlEtl.Jobs
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
                 }
-                throw; // Ném lại lỗi để Hangfire đánh dấu job là 'Failed'
+                throw;
             }
         }
 
@@ -172,7 +173,8 @@ namespace MongoToSqlEtl.Jobs
                             Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
 
                             FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-                            NotificationService.SendRecordErrorAsync(SourceCollectionName, recordId, exception).GetAwaiter().GetResult();
+                            // Thêm ID lỗi vào danh sách của lần chạy hiện tại
+                            CurrentRunFailedIds.Add(recordId);
                         }
                     }
 

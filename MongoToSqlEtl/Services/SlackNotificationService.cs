@@ -53,25 +53,48 @@ namespace MongoToSqlEtl.Services
             await SendMessageAsync(payload);
         }
 
-        public async Task SendRecordErrorAsync(string jobName, string recordId, Exception exception)
+        public async Task SendFailedRecordsSummaryAsync(string jobName, List<string> recordIds)
         {
-            if (_webhookUrl == null) return;
+            if (_webhookUrl == null || recordIds.Count == 0) return;
+
+            // Để tránh tin nhắn quá dài, có thể giới hạn số lượng ID hiển thị
+            const int maxIdsToShow = 20;
+            var idsToShow = recordIds.Take(maxIdsToShow).ToList();
+            var moreIdsCount = recordIds.Count - idsToShow.Count;
+
+            var idListText = string.Join("\n", idsToShow.Select(id => $"`{id}`"));
+            if (moreIdsCount > 0)
+            {
+                idListText += $"\n... và {moreIdsCount} ID khác.";
+            }
 
             var payload = new
             {
-                text = $"⚠️ Lỗi dòng dữ liệu trong Job: *{jobName}*",
+                text = $"⚠️ {recordIds.Count} dòng dữ liệu bị lỗi trong Job: *{jobName}*",
                 blocks = new object[]
                 {
+                    new {
+                        type = "header",
+                        text = new { type = "plain_text", text = $"⚠️ Tóm tắt lỗi dữ liệu: {jobName}" }
+                    },
                     new {
                         type = "section",
                         text = new {
                             type = "mrkdwn",
-                            text = $"*Job:* `{jobName}`\n*Record ID:* `{recordId}`\n*Thời gian:* {DateTime.Now:dd/MM/yyyy HH:mm:ss}"
+                            text = $"*Job:* `{jobName}`\n*Tổng số lỗi:* {recordIds.Count}\n*Thời gian:* {DateTime.Now:dd/MM/yyyy HH:mm:ss}"
                         }
                     },
+                    new { type = "divider" },
                     new {
                         type = "section",
-                        text = new { type = "mrkdwn", text = "*Chi tiết lỗi:*\n```" + exception.Message + "```" }
+                        text = new { type = "mrkdwn", text = "*Danh sách ID bị lỗi (tối đa 20):*\n" + idListText }
+                    },
+                    new {
+                        type = "context",
+                        elements = new object[]
+                        {
+                            new { type = "mrkdwn", text = "Vui lòng kiểm tra log để xem chi tiết từng lỗi." }
+                        }
                     }
                 }
             };
