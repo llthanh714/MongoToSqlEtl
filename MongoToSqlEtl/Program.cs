@@ -20,7 +20,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("Bắt đầu khởi tạo ứng dụng ETL Host...");
+    Log.Information("Starting ETL Host application initialization..");
 
     var builder = WebApplication.CreateBuilder(args);
 
@@ -133,14 +133,14 @@ try
             }
     );
 
-    Log.Information("Ứng dụng đã khởi tạo xong. Hangfire Dashboard đang chạy tại /hangfire.");
+    Log.Information("Application initialization completed. Hangfire Dashboard is running at /hangfire.");
 
     // --- STEP 8: Chạy ứng dụng ---
     app.Run();
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "Host của ứng dụng ETL đã gặp lỗi nghiêm trọng khi khởi tạo.");
+    Log.Fatal(ex, "The ETL application's host encountered a critical error during initialization.");
 }
 finally
 {

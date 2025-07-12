@@ -20,19 +20,21 @@ namespace MongoToSqlEtl.Jobs
         protected override string MongoDatabaseName => "arcusairdb";
         private const string DestPatientOrdersTable = "patientorders";
         private const string DestPatientOrderItemsTable = "patientorderitems";
+        private const string DestPatientDiagnosisuidsTable = "patientdiagnosisuids";
         private const string DestDispenseBatchDetailTable = "dispensebatchdetail";
 
         public new async Task RunAsync(PerformContext? context)
         {
-            context?.WriteLine("Bắt đầu thực thi Job...");
+            context?.WriteLine("Starting job execution...");
             await base.RunAsync(context);
-            context?.WriteLine("Job đã thực thi xong.");
+            context?.WriteLine("Job execution completed.");
         }
 
         protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context)
         {
             var patientordersDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrdersTable);
             var patientorderitemsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrderItemsTable);
+            var patientdiagnosisuidsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientDiagnosisuidsTable);
             var dispensebatchdetailDef = TableDefinition.FromTableName(SqlConnectionManager, DestDispenseBatchDetailTable);
 
             var source = CreateMongoDbSource(startDate, endDate, failedIds);
@@ -43,10 +45,13 @@ namespace MongoToSqlEtl.Jobs
             var transformPatientOrders = DataTransformer.CreateTransformComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
             var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems(itemFieldsToKeepAsObject);
             var transformOrderItemForSql = DataTransformer.CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
+            var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeDiagnosisUids(itemFieldsToKeepAsObject);
+            var transformDiagnosisUidsSql = DataTransformer.CreateTransformComponent([.. patientdiagnosisuidsDef.Columns.Select(c => c.Name)]);
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
             var destPatientOrders = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrdersTable);
             var destPatientOrderItems = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrderItemsTable);
+            var destPatientDiagnosisUids = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientDiagnosisuidsTable);
             var destDispenseBatchDetail = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestDispenseBatchDetailTable);
 
             var multicastOrders = new Multicast<ExpandoObject>();
@@ -59,6 +64,13 @@ namespace MongoToSqlEtl.Jobs
             transformPatientOrders.LinkTo(destPatientOrders);
             transformPatientOrders.LinkErrorTo(logErrors);
             destPatientOrders.LinkErrorTo(logErrors);
+
+            multicastOrders.LinkTo(flattenAndNormalizeDiagnosisUids);
+            flattenAndNormalizeDiagnosisUids.LinkErrorTo(logErrors);
+            flattenAndNormalizeDiagnosisUids.LinkTo(transformDiagnosisUidsSql);
+            transformDiagnosisUidsSql.LinkErrorTo(logErrors);
+            transformDiagnosisUidsSql.LinkTo(destPatientDiagnosisUids);
+            destPatientDiagnosisUids.LinkErrorTo(logErrors);
 
             multicastOrders.LinkTo(flattenAndNormalizeOrderItems);
             flattenAndNormalizeOrderItems.LinkErrorTo(logErrors);
@@ -86,7 +98,12 @@ namespace MongoToSqlEtl.Jobs
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, keepAsObjectFields));
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, "patientorderitems", keepAsObjectFields));
+        }
+
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeDiagnosisUids(HashSet<string> keepAsObjectFields)
+        {
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, "patientdiagnosisuids", keepAsObjectFields));
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
@@ -94,7 +111,7 @@ namespace MongoToSqlEtl.Jobs
             return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols));
         }
 
-        private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow, HashSet<string> keepAsObjectFields)
+        private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow, string nestedDataField, HashSet<string> keepAsObjectFields)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
             if (parentAsDict.TryGetValue("_id", out var parentId) && parentId is ObjectId poid)
@@ -102,7 +119,7 @@ namespace MongoToSqlEtl.Jobs
                 parentAsDict["_id"] = poid.ToString();
             }
 
-            if (parentAsDict.TryGetValue("patientorderitems", out object? value) && value is IEnumerable<object> orderItems)
+            if (parentAsDict.TryGetValue(nestedDataField, out object? value) && value is IEnumerable<object> orderItems)
             {
                 foreach (object? sourceItem in orderItems)
                 {

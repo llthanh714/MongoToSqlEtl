@@ -51,19 +51,19 @@ namespace MongoToSqlEtl.Jobs
 
                 var pipeline = BuildPipeline(lastSuccessfulRun, currentRunStartTime, pendingFailedRecordIds, context);
 
-                context?.WriteLine($"Bắt đầu thực thi Network cho job '{SourceCollectionName}'...");
-                Log.Information("Bắt đầu thực thi Network cho job '{JobName}'...", SourceCollectionName);
+                context?.WriteLine($"Starting Network execution for the job '{SourceCollectionName}'...");
+                Log.Information("Starting Network execution for job '{JobName}'...", SourceCollectionName);
 
                 await Network.ExecuteAsync(pipeline.Source);
 
-                context?.WriteLine("Network đã thực thi xong.");
-                Log.Information("Network đã thực thi xong cho job '{JobName}'.", SourceCollectionName);
+                context?.WriteLine("The network execution is complete.");
+                Log.Information("The network has finished executing for the job '{JobName}'.", SourceCollectionName);
 
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
                 long failedCount = pipeline.ErrorDestination.ProgressCount;
 
-                context?.WriteLine($"Thống kê: Nguồn={totalSourceCount}, Thành công={successCount}, Lỗi={failedCount}");
+                context?.WriteLine($"Summary --> Sources: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
                 if (pendingFailedRecordIds.Count != 0)
@@ -74,7 +74,7 @@ namespace MongoToSqlEtl.Jobs
             catch (Exception ex)
             {
                 context?.SetTextColor(ConsoleTextColor.Red);
-                context?.WriteLine($"Job '{SourceCollectionName}' đã thất bại với lỗi nghiêm trọng.");
+                context?.WriteLine($"Job '{SourceCollectionName}' has failed with a critical error.");
                 context?.WriteLine(ex.ToString());
                 context?.ResetTextColor();
 
@@ -97,7 +97,7 @@ namespace MongoToSqlEtl.Jobs
 
             if (failedIds.Count != 0)
             {
-                Log.Information("[{JobName}] Thêm {Count} bản ghi bị lỗi vào truy vấn nguồn.", SourceCollectionName, failedIds.Count);
+                Log.Information("[{JobName}] Added {Count} failed records to the source query.", SourceCollectionName, failedIds.Count);
                 var objectIds = failedIds.Select(id => new ObjectId(id)).ToList();
                 var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
                 finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
@@ -107,7 +107,7 @@ namespace MongoToSqlEtl.Jobs
                 finalFilter = watermarkFilter;
             }
 
-            Log.Information("[{JobName}] Lấy dữ liệu từ collection '{collection}' trong khoảng: [{StartDate}, {EndDate}) và/hoặc các ID lỗi.",
+            Log.Information("[{JobName}] Retrieving data from collection '{collection}' in the range: [{StartDate}, {EndDate}) and/or by error IDs.",
                 SourceCollectionName, MongoDatabaseName, startDate, endDate);
 
             return new MongoDbSource<ExpandoObject>
@@ -132,7 +132,7 @@ namespace MongoToSqlEtl.Jobs
 
                     if (string.IsNullOrEmpty(json))
                     {
-                        Log.Error(exception, "Dữ liệu lỗi (RecordAsJson) bị rỗng hoặc null.");
+                        Log.Error(exception, "RecordAsJson is missing or contains no data.");
                         return;
                     }
 
@@ -146,13 +146,13 @@ namespace MongoToSqlEtl.Jobs
 
                         if (string.IsNullOrEmpty(recordId) || recordId == "[]")
                         {
-                            Log.Warning(exception, "Không tìm thấy ID hợp lệ trong bản ghi lỗi để ghi nhận. Data: {@ErrorRecord}", recordDict);
+                            Log.Warning(exception, "No valid identifier detected in the error record for tracking. Data: {@ErrorRecord}", recordDict);
                         }
                         else
                         {
                             // Ghi log vào cả Serilog và Hangfire Dashboard
-                            context?.WriteLine($"Lỗi dòng dữ liệu. ID: {recordId}. Lỗi: {exception.Message}");
-                            Log.Warning(exception, "Lỗi Dòng Dữ Liệu. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+                            context?.WriteLine($"Error in data row. ID: {recordId}. Details: {exception.Message}");
+                            Log.Warning(exception, "Record Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
 
                             FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
                             NotificationService.SendRecordErrorAsync(SourceCollectionName, recordId, exception).GetAwaiter().GetResult();
@@ -178,7 +178,7 @@ namespace MongoToSqlEtl.Jobs
                     }
                     catch (JsonException ex)
                     {
-                        Log.Error(ex, "Không thể phân tích dữ liệu lỗi từ JSON. Raw JSON: {Json}", json);
+                        Log.Error(ex, "Unable to parse error data from JSON. Raw JSON: {Json}", json);
                     }
                 }
             };
