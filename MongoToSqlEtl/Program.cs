@@ -4,10 +4,13 @@ using Hangfire;
 using Hangfire.Console;
 using Hangfire.Dashboard.BasicAuthorization;
 using Hangfire.SqlServer;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using MongoDB.Driver;
 using MongoToSqlEtl.Jobs;
 using MongoToSqlEtl.Services;
 using Serilog;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
 
 // --- STEP 1: Cấu hình Serilog ---
 Log.Logger = new LoggerConfiguration()
@@ -94,6 +97,19 @@ try
     // Thêm Hangfire Server để xử lý các job trong background
     builder.Services.AddHangfireServer();
 
+    _ = builder.WebHost.ConfigureKestrel(serverOptions =>
+    {
+        serverOptions.ConfigureHttpsDefaults(https =>
+        {
+            https.ServerCertificate = new X509Certificate2("C:\\certificates\\phuongchau.pfx", "Phuongchau");
+        });
+        serverOptions.Listen(IPAddress.Any, 7272, listenOptions =>
+        {
+            listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+            _ = listenOptions.UseHttps();
+        });
+    });
+
     // --- STEP 5: Build ứng dụng ---
     var app = builder.Build();
 
@@ -126,7 +142,7 @@ try
     // Job này sẽ được tự động thêm/cập nhật khi ứng dụng khởi động
     RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
         "minutely-patientorder",
-        service => service.RunAsync(null), "*/2 * * * *",
+        service => service.RunAsync(null), "* * * * *",
             new RecurringJobOptions
             {
                 TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),

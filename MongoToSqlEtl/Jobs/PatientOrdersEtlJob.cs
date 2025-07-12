@@ -57,31 +57,35 @@ namespace MongoToSqlEtl.Jobs
             var multicastOrders = new Multicast<ExpandoObject>();
             var multicastNormalizedItems = new Multicast<ExpandoObject>();
 
+
+            // Tách luồng cho dữ liệu 'patientorders' và các mục liên quan
             source.LinkTo(multicastOrders);
             source.LinkErrorTo(logErrors);
 
+            // Luồng 1: xử lý dữ liệu 'patientorders'
             multicastOrders.LinkTo(transformPatientOrders);
             transformPatientOrders.LinkTo(destPatientOrders);
             transformPatientOrders.LinkErrorTo(logErrors);
             destPatientOrders.LinkErrorTo(logErrors);
 
+            // Luồng 2: xử lý dữ liệu 'patientdiagnosisuids'
             multicastOrders.LinkTo(flattenAndNormalizeDiagnosisUids);
-            flattenAndNormalizeDiagnosisUids.LinkErrorTo(logErrors);
             flattenAndNormalizeDiagnosisUids.LinkTo(transformDiagnosisUidsSql);
-            transformDiagnosisUidsSql.LinkErrorTo(logErrors);
             transformDiagnosisUidsSql.LinkTo(destPatientDiagnosisUids);
             destPatientDiagnosisUids.LinkErrorTo(logErrors);
 
+            // Luồng 3: Tách 'patientorderitems' ra thành các luồng con
             multicastOrders.LinkTo(flattenAndNormalizeOrderItems);
             flattenAndNormalizeOrderItems.LinkErrorTo(logErrors);
 
+            // Luồng 3.1: Xử lý các mục 'patientorderitems'
             flattenAndNormalizeOrderItems.LinkTo(multicastNormalizedItems);
-
             multicastNormalizedItems.LinkTo(transformOrderItemForSql);
             transformOrderItemForSql.LinkTo(destPatientOrderItems);
             transformOrderItemForSql.LinkErrorTo(logErrors);
             destPatientOrderItems.LinkErrorTo(logErrors);
 
+            // Luồng 3.2: Xử lý các chi tiết 'dispensebatchdetail'
             multicastNormalizedItems.LinkTo(flattenDispenseBatchDetails);
             flattenDispenseBatchDetails.LinkTo(destDispenseBatchDetail);
             flattenDispenseBatchDetails.LinkErrorTo(logErrors);
