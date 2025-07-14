@@ -3,7 +3,6 @@ using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
 using Hangfire.Console;
 using Hangfire.Server;
-using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
@@ -102,59 +101,77 @@ namespace MongoToSqlEtl.Jobs
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, "patientorderitems", keepAsObjectFields));
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(
+                parentRow,
+                keepAsObjectFields,
+                "patientordersuid"));
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeDiagnosisUids(HashSet<string> keepAsObjectFields)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(parentRow, "patientdiagnosisuids", keepAsObjectFields));
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(
+                parentRow,
+                keepAsObjectFields,
+                "patientordersuid"));
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols));
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols, "patientorderitemsuid"));
         }
 
-        private static IEnumerable<ExpandoObject> FlattenAndNormalizeItems(ExpandoObject parentRow, string nestedDataField, HashSet<string> keepAsObjectFields)
+        private static List<ExpandoObject> FlattenAndNormalizeItems(
+            ExpandoObject parentRow,
+            HashSet<string> keepAsObjectFields,
+            string foreignKeyName)
         {
+            // This method now returns a List to avoid iterator block issues with locking.
+            var results = new List<ExpandoObject>();
             var parentAsDict = (IDictionary<string, object?>)parentRow;
-            if (parentAsDict.TryGetValue("_id", out var parentId) && parentId is ObjectId poid)
-            {
-                parentAsDict["_id"] = poid.ToString();
-            }
 
-            if (parentAsDict.TryGetValue(nestedDataField, out object? value) && value is IEnumerable<object> orderItems)
+            string parentIdAsString = parentAsDict.TryGetValue("_id", out var parentIdValue)
+                ? parentIdValue?.ToString() ?? string.Empty
+                : string.Empty;
+
+            if (parentAsDict.TryGetValue("patientorderitems", out object? value) && value is IEnumerable<object> orderItems)
             {
                 foreach (object? sourceItem in orderItems)
                 {
                     if (sourceItem == null) continue;
-                    var newItem = new ExpandoObject();
+
+                    // The TransformObject method is now thread-safe with an internal lock.
+                    var newItem = DataTransformer.TransformObject((ExpandoObject)sourceItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
-                    var sourceItemDict = (IDictionary<string, object?>)sourceItem;
-                    foreach (var key in sourceItemDict.Keys)
-                    {
-                        DataTransformer.MapProperty(sourceItemDict, newItemDict, key, keepAsObjectFields);
-                    }
-                    newItemDict["patientordersuid"] = parentAsDict["_id"];
-                    yield return newItem;
+
+                    // Reliably overwrite the foreign key with the provided name
+                    newItemDict[foreignKeyName] = parentIdAsString;
+                    results.Add(newItem);
                 }
             }
+            return results;
         }
 
-        private static IEnumerable<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols)
+        private static List<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols, string foreignKeyName)
         {
+            var results = new List<ExpandoObject>();
             var poItemDict = (IDictionary<string, object?>)poItemRow;
+
             if (poItemDict.TryGetValue("dispensebatchdetail", out object? val) && val is IEnumerable<object> details)
             {
                 foreach (object? detail in details)
                 {
                     if (detail == null) continue;
+
+                    // The TransformObject method is now thread-safe with an internal lock.
                     var targetDetail = DataTransformer.TransformObject((ExpandoObject)detail, cols);
                     var targetDict = (IDictionary<string, object?>)targetDetail;
-                    targetDict["patientorderitemsuid"] = poItemDict["_id"];
-                    yield return targetDetail;
+
+                    // Reliably overwrite the foreign key with the provided name
+                    targetDict[foreignKeyName] = poItemDict["_id"];
+                    results.Add(targetDetail);
                 }
             }
+            return results;
         }
 
         #endregion

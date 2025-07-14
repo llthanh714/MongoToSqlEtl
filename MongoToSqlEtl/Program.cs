@@ -139,7 +139,6 @@ try
     app.UseHangfireDashboard("/hangfire", hangfireOptions);
 
     // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
-    // Job này sẽ được tự động thêm/cập nhật khi ứng dụng khởi động
     RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
         "minutely-patientorder",
         service => service.RunAsync(null), "* * * * *",
@@ -160,5 +159,5 @@ catch (Exception ex)
 }
 finally
 {
-    Log.CloseAndFlush();
+    await Log.CloseAndFlushAsync();
 }

@@ -23,6 +23,9 @@ namespace MongoToSqlEtl.Jobs
 
         // Danh sách để thu thập các ID bị lỗi trong lần chạy hiện tại
         protected List<string> CurrentRunFailedIds { get; } = [];
+        // Object lock để đảm bảo an toàn luồng khi thêm vào danh sách lỗi
+        private readonly object _failedIdsLock = new();
+
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
         protected virtual int MaxBatchIntervalInMinutes => 30;
@@ -174,8 +177,12 @@ namespace MongoToSqlEtl.Jobs
                             Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
 
                             FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-                            // Thêm ID lỗi vào danh sách của lần chạy hiện tại
-                            CurrentRunFailedIds.Add(recordId);
+
+                            // Sử dụng lock để đảm bảo an toàn luồng khi thêm vào danh sách
+                            lock (_failedIdsLock)
+                            {
+                                CurrentRunFailedIds.Add(recordId);
+                            }
                         }
                     }
 
