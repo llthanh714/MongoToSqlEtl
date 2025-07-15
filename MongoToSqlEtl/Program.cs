@@ -14,7 +14,7 @@ using System.Security.Cryptography.X509Certificates;
 
 // --- STEP 1: Cấu hình Serilog ---
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Warning()
+    .MinimumLevel.Information()
     .Enrich.FromLogContext()
     .WriteTo.Console()
     .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
@@ -31,6 +31,8 @@ try
     var sqlPassword = Environment.GetEnvironmentVariable("__DB_PASSWORD__", EnvironmentVariableTarget.Machine);
     var mongoPassword = Environment.GetEnvironmentVariable("__MONGOGDB_PASSWORD__", EnvironmentVariableTarget.Machine);
     var hangfireDashboardPassword = Environment.GetEnvironmentVariable("__HANGFIRE_DASHBOARD_PASSWORD__", EnvironmentVariableTarget.Machine);
+    var kestrelCertPassword = Environment.GetEnvironmentVariable("__KESTREL_CERT_PASSWORD__", EnvironmentVariableTarget.Machine);
+
 
     if (string.IsNullOrWhiteSpace(sqlPassword))
         throw new Exception("__DB_PASSWORD__ environment variable is not set.");
@@ -40,6 +42,10 @@ try
 
     if (string.IsNullOrWhiteSpace(hangfireDashboardPassword))
         throw new Exception("__HANGFIRE_DASHBOARD_PASSWORD__ environment variable is not set.");
+
+    if (string.IsNullOrWhiteSpace(kestrelCertPassword))
+        throw new Exception("__KESTREL_CERT_PASSWORD__ environment variable is not set.");
+
 
     // --- STEP 2: Tích hợp Serilog vào ASP.NET Core ---
     builder.Host.UseSerilog();
@@ -97,12 +103,25 @@ try
     // Thêm Hangfire Server để xử lý các job trong background
     builder.Services.AddHangfireServer();
 
+    // CONFIGURATION FIX: Load Kestrel configuration from appsettings.json
     _ = builder.WebHost.ConfigureKestrel(serverOptions =>
     {
+        var certConfig = builder.Configuration.GetSection("Kestrel:Certificate");
+        var certPath = certConfig["Path"];
+        // Replace placeholder with password from environment variable
+        var certPassword = certConfig["Password"]?.Replace("__KESTREL_CERT_PASSWORD__", kestrelCertPassword);
+
+        if (string.IsNullOrEmpty(certPath) || string.IsNullOrEmpty(certPassword))
+        {
+            Log.Warning("Kestrel certificate path or password is not configured. HTTPS will not be available.");
+            return;
+        }
+
         serverOptions.ConfigureHttpsDefaults(https =>
         {
-            https.ServerCertificate = new X509Certificate2("C:\\certificates\\phuongchau.pfx", "Phuongchau");
+            https.ServerCertificate = new X509Certificate2(certPath, certPassword);
         });
+
         serverOptions.Listen(IPAddress.Any, 7272, listenOptions =>
         {
             listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
