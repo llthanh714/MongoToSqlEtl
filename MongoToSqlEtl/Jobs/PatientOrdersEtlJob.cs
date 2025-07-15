@@ -51,7 +51,6 @@ namespace MongoToSqlEtl.Jobs
             // FIX: Use dedicated flattening logic for different array types
             var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeObjectsComponent("patientorderitems", itemFieldsToKeepAsObject);
             var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeObjectsComponent("patientdiagnosisuids", itemFieldsToKeepAsObject);
-            // var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizePrimitivesComponent("patientdiagnosisuids", "diagnosisuid");
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
             // Create destination components
@@ -122,38 +121,6 @@ namespace MongoToSqlEtl.Jobs
                 localArrayFieldName,
                 localKeepAsObjectFields,
                 localForeignKeyName));
-        }
-
-        // FIX: New dedicated function for flattening arrays of primitive types (e.g., strings, numbers)
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizePrimitivesComponent(string arrayFieldName, string targetColumnName)
-        {
-            var localArrayFieldName = arrayFieldName;
-            var localTargetColumnName = targetColumnName;
-            var localForeignKeyName = "patientordersuid";
-
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
-            {
-                var results = new List<ExpandoObject>();
-                var parentAsDict = (IDictionary<string, object?>)parentRow;
-
-                string parentIdAsString = parentAsDict.TryGetValue("_id", out var parentIdValue)
-                    ? parentIdValue?.ToString() ?? string.Empty
-                    : string.Empty;
-
-                if (parentAsDict.TryGetValue(localArrayFieldName, out object? value) && value is IEnumerable<object> items)
-                {
-                    foreach (var item in items)
-                    {
-                        if (item == null) continue;
-
-                        var newItem = new ExpandoObject() as IDictionary<string, object?>;
-                        newItem[localForeignKeyName] = parentIdAsString;
-                        newItem[localTargetColumnName] = item.ToString(); // Store the primitive value
-                        results.Add((ExpandoObject)newItem);
-                    }
-                }
-                return results;
-            });
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)

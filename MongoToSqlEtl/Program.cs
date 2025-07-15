@@ -14,7 +14,7 @@ using System.Security.Cryptography.X509Certificates;
 
 // --- STEP 1: Cấu hình Serilog ---
 Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
+    .MinimumLevel.Warning()
     .Enrich.FromLogContext()
     .WriteTo.Console()
     .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
