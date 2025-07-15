@@ -78,7 +78,7 @@ try
 
     // Đăng ký các Job ETL
     // Dùng AddTransient để mỗi lần Hangfire chạy job, nó sẽ tạo một instance mới.
-    builder.Services.AddTransient<PatientOrdersEtlJob>();
+    // builder.Services.AddSingleton<PatientOrdersEtlJob>();
 
     // --- STEP 4: Cấu hình Hangfire ---
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
@@ -155,7 +155,7 @@ try
         ]
     };
 
-    app.UseHangfireDashboard("/hangfire", hangfireOptions);
+    app.UseHangfireDashboard("/etl", hangfireOptions);
 
     // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
     RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
@@ -167,7 +167,7 @@ try
             }
     );
 
-    Log.Information("Application initialization completed. Hangfire Dashboard is running at /hangfire.");
+    Log.Information("Application initialization completed. Hangfire Dashboard is running at /etl.");
 
     // --- STEP 8: Chạy ứng dụng ---
     app.Run();

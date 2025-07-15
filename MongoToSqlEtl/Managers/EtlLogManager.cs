@@ -6,9 +6,8 @@ namespace MongoToSqlEtl.Managers
 {
     public class EtlLogManager(IConnectionManager connectionManager, string sourceCollectionName)
     {
-        // FIX: Changed default start date to a sensible past date.
         // Please adjust this date to your project's actual start date.
-        private static readonly DateTime DefaultStartDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        private static readonly DateTime DefaultStartDate = new(2025, 7, 1, 0, 0, 0, DateTimeKind.Utc);
 
         public DateTime GetLastSuccessfulWatermark()
         {

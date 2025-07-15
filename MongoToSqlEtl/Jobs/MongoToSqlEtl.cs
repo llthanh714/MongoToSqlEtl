@@ -28,7 +28,7 @@ namespace MongoToSqlEtl.Jobs
 
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 120;
+        protected virtual int MaxBatchIntervalInMinutes => 30;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -233,8 +233,6 @@ namespace MongoToSqlEtl.Jobs
                     }
                     catch (Exception ex)
                     {
-                        // This is the final safety net. If anything goes wrong inside the error logging,
-                        // log it to the main logger and do not re-throw, to avoid crashing the process.
                         Log.Fatal(ex, "A critical, unhandled exception occurred within the error logging action itself.");
                     }
                 }
