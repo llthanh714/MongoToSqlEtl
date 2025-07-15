@@ -41,50 +41,58 @@ namespace MongoToSqlEtl.Jobs
 
             var itemFieldsToKeepAsObject = new HashSet<string> { "dispensebatchdetail" };
 
+            // Create transformation components
             var transformPatientOrders = DataTransformer.CreateTransformComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
-            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeOrderItems(itemFieldsToKeepAsObject);
             var transformOrderItemForSql = DataTransformer.CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
-            var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeDiagnosisUids(itemFieldsToKeepAsObject);
             var transformDiagnosisUidsSql = DataTransformer.CreateTransformComponent([.. patientdiagnosisuidsDef.Columns.Select(c => c.Name)]);
+
+            // FIX: LOGIC & THREADING: Use a generalized function to pass the correct array name and ensure local copies for lambda capture
+            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeComponent("patientorderitems", itemFieldsToKeepAsObject);
+            var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeComponent("patientdiagnosisuids", []); // No nested objects to keep
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
+            // Create destination components
             var destPatientOrders = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrdersTable);
             var destPatientOrderItems = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrderItemsTable);
             var destPatientDiagnosisUids = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientDiagnosisuidsTable);
             var destDispenseBatchDetail = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestDispenseBatchDetailTable);
 
+            // Create multicast components
             var multicastOrders = new Multicast<ExpandoObject>();
             var multicastNormalizedItems = new Multicast<ExpandoObject>();
 
+            // FIX: CRASH RISK: Link errors from ALL components to the error handler
 
-            // Tách luồng cho dữ liệu 'patientorders' và các mục liên quan
+            // Main flow from source
             source.LinkTo(multicastOrders);
             source.LinkErrorTo(logErrors);
 
-            // Luồng 1: xử lý dữ liệu 'patientorders'
+            // Flow 1: patientorders
             multicastOrders.LinkTo(transformPatientOrders);
             transformPatientOrders.LinkTo(destPatientOrders);
             transformPatientOrders.LinkErrorTo(logErrors);
             destPatientOrders.LinkErrorTo(logErrors);
 
-            // Luồng 2: xử lý dữ liệu 'patientdiagnosisuids'
+            // Flow 2: patientdiagnosisuids
             multicastOrders.LinkTo(flattenAndNormalizeDiagnosisUids);
             flattenAndNormalizeDiagnosisUids.LinkTo(transformDiagnosisUidsSql);
             transformDiagnosisUidsSql.LinkTo(destPatientDiagnosisUids);
+            flattenAndNormalizeDiagnosisUids.LinkErrorTo(logErrors);
+            transformDiagnosisUidsSql.LinkErrorTo(logErrors);
             destPatientDiagnosisUids.LinkErrorTo(logErrors);
 
-            // Luồng 3: Tách 'patientorderitems' ra thành các luồng con
+            // Flow 3: patientorderitems (which then splits again)
             multicastOrders.LinkTo(flattenAndNormalizeOrderItems);
+            flattenAndNormalizeOrderItems.LinkTo(multicastNormalizedItems);
             flattenAndNormalizeOrderItems.LinkErrorTo(logErrors);
 
-            // Luồng 3.1: Xử lý các mục 'patientorderitems'
-            flattenAndNormalizeOrderItems.LinkTo(multicastNormalizedItems);
+            // Flow 3.1: patientorderitems main data
             multicastNormalizedItems.LinkTo(transformOrderItemForSql);
             transformOrderItemForSql.LinkTo(destPatientOrderItems);
             transformOrderItemForSql.LinkErrorTo(logErrors);
             destPatientOrderItems.LinkErrorTo(logErrors);
 
-            // Luồng 3.2: Xử lý các chi tiết 'dispensebatchdetail'
+            // Flow 3.2: dispensebatchdetail nested within patientorderitems
             multicastNormalizedItems.LinkTo(flattenDispenseBatchDetails);
             flattenDispenseBatchDetails.LinkTo(destDispenseBatchDetail);
             flattenDispenseBatchDetails.LinkErrorTo(logErrors);
@@ -92,40 +100,42 @@ namespace MongoToSqlEtl.Jobs
 
             return new EtlPipeline(
                 Source: source,
-                Destinations: [destPatientOrders, destPatientOrderItems, destDispenseBatchDetail],
+                Destinations: [destPatientOrders, destPatientOrderItems, destPatientDiagnosisUids, destDispenseBatchDetail],
                 ErrorDestination: logErrors
             );
         }
 
         #region Transformation Logic Specific to PatientOrders
 
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeOrderItems(HashSet<string> keepAsObjectFields)
+        // FIX: LOGIC & THREADING: Generalized function for flattening to avoid code duplication and logic errors.
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeComponent(string arrayFieldName, HashSet<string> keepAsObjectFields)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(
-                parentRow,
-                keepAsObjectFields,
-                "patientordersuid"));
-        }
+            // Create local copies of the variables to be captured by the lambda.
+            var localArrayFieldName = arrayFieldName;
+            var localKeepAsObjectFields = keepAsObjectFields;
+            var localForeignKeyName = "patientordersuid"; // Assuming this is the foreign key for all flattened items
 
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeDiagnosisUids(HashSet<string> keepAsObjectFields)
-        {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(
                 parentRow,
-                keepAsObjectFields,
-                "patientordersuid"));
+                localArrayFieldName,
+                localKeepAsObjectFields,
+                localForeignKeyName));
         }
 
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, cols, "patientorderitemsuid"));
+            // Create a local copy of the variable to be captured by the lambda.
+            var localCols = cols;
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, localCols, "patientorderitemsuid"));
         }
 
+        // FIX: LOGIC: This function now accepts the array field name to look for.
         private static List<ExpandoObject> FlattenAndNormalizeItems(
             ExpandoObject parentRow,
+            string arrayFieldName,
             HashSet<string> keepAsObjectFields,
             string foreignKeyName)
         {
-            // This method now returns a List to avoid iterator block issues with locking.
             var results = new List<ExpandoObject>();
             var parentAsDict = (IDictionary<string, object?>)parentRow;
 
@@ -133,14 +143,18 @@ namespace MongoToSqlEtl.Jobs
                 ? parentIdValue?.ToString() ?? string.Empty
                 : string.Empty;
 
-            if (parentAsDict.TryGetValue("patientorderitems", out object? value) && value is IEnumerable<object> orderItems)
+            if (parentAsDict.TryGetValue(arrayFieldName, out object? value) && value is IEnumerable<object> items)
             {
-                foreach (object? sourceItem in orderItems)
+                foreach (object? sourceItem in items)
                 {
                     if (sourceItem == null) continue;
 
-                    // The TransformObject method is now thread-safe with an internal lock.
-                    var newItem = DataTransformer.TransformObject((ExpandoObject)sourceItem, [], keepAsObjectFields);
+                    var transformedItem = (sourceItem is ExpandoObject @object)
+                        ? @object
+                        : ConvertToExando(sourceItem);
+
+                    // The TransformObject method is thread-safe with an internal lock.
+                    var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
                     // Reliably overwrite the foreign key with the provided name
@@ -149,6 +163,15 @@ namespace MongoToSqlEtl.Jobs
                 }
             }
             return results;
+        }
+
+        private static ExpandoObject ConvertToExando(object obj)
+        {
+            var expando = new ExpandoObject();
+            var dict = (IDictionary<string, object?>)expando;
+            foreach (var property in obj.GetType().GetProperties())
+                dict.Add(property.Name, property.GetValue(obj));
+            return expando;
         }
 
         private static List<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols, string foreignKeyName)

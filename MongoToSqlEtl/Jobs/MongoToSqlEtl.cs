@@ -121,10 +121,25 @@ namespace MongoToSqlEtl.Jobs
 
             if (failedIds.Count != 0)
             {
-                Log.Information("[{JobName}] Adding {Count} failed records to the source query.", SourceCollectionName, failedIds.Count);
-                var objectIds = failedIds.Select(id => new ObjectId(id)).ToList();
-                var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
-                finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
+                // FIX: FORMAT EXCEPTION: Validate that the ID is a valid ObjectId before trying to convert.
+                // This prevents crashes if an invalid ID (like "INVALID_JSON_RECORD") is in the failed records table.
+                var objectIds = failedIds
+                    .Where(id => ObjectId.TryParse(id, out _))
+                    .Select(id => new ObjectId(id))
+                    .ToList();
+
+                Log.Information("[{JobName}] Found {TotalCount} pending failed records, {ValidCount} are valid ObjectIds.",
+                    SourceCollectionName, failedIds.Count, objectIds.Count);
+
+                if (objectIds.Count > 0)
+                {
+                    var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
+                    finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
+                }
+                else
+                {
+                    finalFilter = watermarkFilter;
+                }
             }
             else
             {
@@ -207,6 +222,8 @@ namespace MongoToSqlEtl.Jobs
                     catch (JsonException ex)
                     {
                         Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", json);
+                        // FIX: DATA INTEGRITY: Log the raw JSON to the failed records table for manual debugging
+                        FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {json}");
                     }
                 }
             };

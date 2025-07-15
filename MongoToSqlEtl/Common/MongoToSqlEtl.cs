@@ -88,7 +88,9 @@ namespace MongoToSqlEtl.Common
                     {
                         if (keepAsObjectFields != null && keepAsObjectFields.Contains(key))
                         {
-                            target[key] = value;
+                            // FIX: ACCESS VIOLATION: Do not copy the reference. Create a new list from the enumerable
+                            // to break the reference to the source object's internal collection, preventing memory corruption.
+                            target[key] = enumerable.Cast<object>().ToList();
                         }
                         else
                         {
