@@ -8,6 +8,7 @@ using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
+using Serilog;
 using System.Dynamic;
 
 namespace MongoToSqlEtl.Jobs
@@ -202,7 +203,11 @@ namespace MongoToSqlEtl.Jobs
                     var targetDetail = DataTransformer.TransformObject(expandoDetail, cols);
                     var targetDict = (IDictionary<string, object?>)targetDetail;
 
-                    targetDict[foreignKeyName] = poItemDict["_id"];
+                    if (poItemDict.TryGetValue("_id", out var poItemId) && poItemId != null)
+                    {
+                        targetDict[foreignKeyName] = poItemId;
+                    }
+
                     results.Add(targetDetail);
                 }
             }

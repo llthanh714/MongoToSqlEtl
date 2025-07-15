@@ -12,9 +12,6 @@ namespace MongoToSqlEtl.Common
     /// </summary>
     public static class DataTransformer
     {
-        // Object lock tĩnh để đảm bảo an toàn luồng khi tạo ExpandoObjects
-        private static readonly object ExpandoLock = new();
-
         public static DbMerge<ExpandoObject> CreateDbMergeDestination(IConnectionManager conn, string tableName)
         {
             return new DbMerge<ExpandoObject>(conn, tableName)
@@ -32,35 +29,32 @@ namespace MongoToSqlEtl.Common
 
         public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
         {
-            lock (ExpandoLock)
+            var sourceAsDict = (IDictionary<string, object?>)sourceRow;
+            var targetDict = (IDictionary<string, object?>)new ExpandoObject();
+
+            // If target columns are specified, map only those.
+            if (targetColumns.Count != 0)
             {
-                var sourceAsDict = (IDictionary<string, object?>)sourceRow;
-                var targetDict = (IDictionary<string, object?>)new ExpandoObject();
-
-                // If target columns are specified, map only those.
-                if (targetColumns.Count != 0)
+                foreach (var columnName in targetColumns)
                 {
-                    foreach (var columnName in targetColumns)
-                    {
-                        MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
-                    }
+                    MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
                 }
-                // Otherwise, map all columns from the source.
-                else
-                {
-                    foreach (var key in sourceAsDict.Keys)
-                    {
-                        MapProperty(sourceAsDict, targetDict, key, keepAsObjectFields);
-                    }
-                }
-
-                // Always ensure the _id column is mapped if it exists in the source
-                if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
-                {
-                    MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
-                }
-                return (ExpandoObject)targetDict;
             }
+            // Otherwise, map all columns from the source.
+            else
+            {
+                foreach (var key in sourceAsDict.Keys)
+                {
+                    MapProperty(sourceAsDict, targetDict, key, keepAsObjectFields);
+                }
+            }
+
+            // Always ensure the _id column is mapped if it exists in the source
+            if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
+            {
+                MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
+            }
+            return (ExpandoObject)targetDict;
         }
 
         public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
