@@ -28,7 +28,7 @@ namespace MongoToSqlEtl.Jobs
 
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 30;
+        protected virtual int MaxBatchIntervalInMinutes => 120;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -89,9 +89,12 @@ namespace MongoToSqlEtl.Jobs
                     await NotificationService.SendFailedRecordsSummaryAsync(SourceCollectionName, CurrentRunFailedIds);
                 }
 
-                if (pendingFailedRecordIds.Count != 0)
+                // FIX: DATA INTEGRITY: Only mark records as resolved if they were in the initial pending list
+                // AND did not fail again in the current run.
+                var successfullyRetriedIds = pendingFailedRecordIds.Except(CurrentRunFailedIds).ToList();
+                if (successfullyRetriedIds.Count > 0)
                 {
-                    FailedRecordManager.MarkRecordsAsResolved(pendingFailedRecordIds);
+                    FailedRecordManager.MarkRecordsAsResolved(successfullyRetriedIds);
                 }
             }
             catch (Exception ex)
@@ -165,65 +168,74 @@ namespace MongoToSqlEtl.Jobs
             {
                 WriteAction = (error, rowIndex) =>
                 {
-                    var exception = error.GetException();
-                    var json = error.RecordAsJson;
-
-                    if (string.IsNullOrEmpty(json))
-                    {
-                        Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
-                        return;
-                    }
-
-                    void ProcessSingleRecord(IDictionary<string, object?> recordDict)
-                    {
-                        string? recordId = null;
-                        if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
-                        {
-                            recordId = idValue.ToString();
-                        }
-
-                        if (string.IsNullOrEmpty(recordId) || recordId == "[]")
-                        {
-                            Log.Warning(exception, "Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
-                        }
-                        else
-                        {
-                            context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
-                            Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
-
-                            FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-
-                            // Sử dụng lock để đảm bảo an toàn luồng khi thêm vào danh sách
-                            lock (_failedIdsLock)
-                            {
-                                CurrentRunFailedIds.Add(recordId);
-                            }
-                        }
-                    }
-
+                    // FIX: ROBUSTNESS: Add a top-level try-catch to prevent the error logging itself from crashing the app.
                     try
                     {
-                        using var jsonDoc = JsonDocument.Parse(json);
-                        if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
+                        var exception = error.GetException();
+                        var json = error.RecordAsJson;
+
+                        if (string.IsNullOrEmpty(json))
                         {
-                            Log.Warning(exception, "Error occurred on a data batch. Batch details: {Json}", json);
-                            var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
-                            if (records != null)
+                            Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
+                            return;
+                        }
+
+                        void ProcessSingleRecord(IDictionary<string, object?> recordDict)
+                        {
+                            string? recordId = null;
+                            if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
                             {
-                                foreach (var record in records) ProcessSingleRecord(record);
+                                recordId = idValue.ToString();
+                            }
+
+                            if (string.IsNullOrEmpty(recordId) || recordId == "[]")
+                            {
+                                Log.Warning(exception, "Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
+                            }
+                            else
+                            {
+                                context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
+                                Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+
+                                FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
+
+                                // Use lock to ensure thread safety when adding to the list
+                                lock (_failedIdsLock)
+                                {
+                                    CurrentRunFailedIds.Add(recordId);
+                                }
                             }
                         }
-                        else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
+
+                        try
                         {
-                            var record = JsonSerializer.Deserialize<ExpandoObject>(json);
-                            if (record != null) ProcessSingleRecord(record);
+                            using var jsonDoc = JsonDocument.Parse(json);
+                            if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
+                            {
+                                Log.Warning(exception, "Error occurred on a data batch. Batch details: {Json}", json);
+                                var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
+                                if (records != null)
+                                {
+                                    foreach (var record in records) ProcessSingleRecord(record);
+                                }
+                            }
+                            else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
+                            {
+                                var record = JsonSerializer.Deserialize<ExpandoObject>(json);
+                                if (record != null) ProcessSingleRecord(record);
+                            }
+                        }
+                        catch (JsonException ex)
+                        {
+                            Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", json);
+                            FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {json}");
                         }
                     }
-                    catch (JsonException ex)
+                    catch (Exception ex)
                     {
-                        Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", json);
-                        // FIX: DATA INTEGRITY: Log the raw JSON to the failed records table for manual debugging
-                        FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {json}");
+                        // This is the final safety net. If anything goes wrong inside the error logging,
+                        // log it to the main logger and do not re-throw, to avoid crashing the process.
+                        Log.Fatal(ex, "A critical, unhandled exception occurred within the error logging action itself.");
                     }
                 }
             };

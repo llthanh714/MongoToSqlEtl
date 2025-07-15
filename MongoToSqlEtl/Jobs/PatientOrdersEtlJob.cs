@@ -3,6 +3,8 @@ using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
 using Hangfire.Console;
 using Hangfire.Server;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
@@ -46,9 +48,10 @@ namespace MongoToSqlEtl.Jobs
             var transformOrderItemForSql = DataTransformer.CreateTransformComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
             var transformDiagnosisUidsSql = DataTransformer.CreateTransformComponent([.. patientdiagnosisuidsDef.Columns.Select(c => c.Name)]);
 
-            // FIX: LOGIC & THREADING: Use a generalized function to pass the correct array name and ensure local copies for lambda capture
-            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeComponent("patientorderitems", itemFieldsToKeepAsObject);
-            var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeComponent("patientdiagnosisuids", []); // No nested objects to keep
+            // FIX: Use dedicated flattening logic for different array types
+            var flattenAndNormalizeOrderItems = CreateFlattenAndNormalizeObjectsComponent("patientorderitems", itemFieldsToKeepAsObject);
+            var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizeObjectsComponent("patientdiagnosisuids", itemFieldsToKeepAsObject);
+            // var flattenAndNormalizeDiagnosisUids = CreateFlattenAndNormalizePrimitivesComponent("patientdiagnosisuids", "diagnosisuid");
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
             // Create destination components
@@ -107,30 +110,60 @@ namespace MongoToSqlEtl.Jobs
 
         #region Transformation Logic Specific to PatientOrders
 
-        // FIX: LOGIC & THREADING: Generalized function for flattening to avoid code duplication and logic errors.
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeComponent(string arrayFieldName, HashSet<string> keepAsObjectFields)
+        // Renamed from CreateFlattenAndNormalizeComponent for clarity
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeObjectsComponent(string arrayFieldName, HashSet<string> keepAsObjectFields)
         {
-            // Create local copies of the variables to be captured by the lambda.
             var localArrayFieldName = arrayFieldName;
             var localKeepAsObjectFields = keepAsObjectFields;
-            var localForeignKeyName = "patientordersuid"; // Assuming this is the foreign key for all flattened items
+            var localForeignKeyName = "patientordersuid";
 
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeItems(
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndNormalizeObjects(
                 parentRow,
                 localArrayFieldName,
                 localKeepAsObjectFields,
                 localForeignKeyName));
         }
 
+        // FIX: New dedicated function for flattening arrays of primitive types (e.g., strings, numbers)
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizePrimitivesComponent(string arrayFieldName, string targetColumnName)
+        {
+            var localArrayFieldName = arrayFieldName;
+            var localTargetColumnName = targetColumnName;
+            var localForeignKeyName = "patientordersuid";
+
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
+            {
+                var results = new List<ExpandoObject>();
+                var parentAsDict = (IDictionary<string, object?>)parentRow;
+
+                string parentIdAsString = parentAsDict.TryGetValue("_id", out var parentIdValue)
+                    ? parentIdValue?.ToString() ?? string.Empty
+                    : string.Empty;
+
+                if (parentAsDict.TryGetValue(localArrayFieldName, out object? value) && value is IEnumerable<object> items)
+                {
+                    foreach (var item in items)
+                    {
+                        if (item == null) continue;
+
+                        var newItem = new ExpandoObject() as IDictionary<string, object?>;
+                        newItem[localForeignKeyName] = parentIdAsString;
+                        newItem[localTargetColumnName] = item.ToString(); // Store the primitive value
+                        results.Add((ExpandoObject)newItem);
+                    }
+                }
+                return results;
+            });
+        }
+
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateDispenseBatchDetailsTransformation(HashSet<string> cols)
         {
-            // Create a local copy of the variable to be captured by the lambda.
             var localCols = cols;
             return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, localCols, "patientorderitemsuid"));
         }
 
-        // FIX: LOGIC: This function now accepts the array field name to look for.
-        private static List<ExpandoObject> FlattenAndNormalizeItems(
+        // Renamed from FlattenAndNormalizeItems for clarity
+        private static List<ExpandoObject> FlattenAndNormalizeObjects(
             ExpandoObject parentRow,
             string arrayFieldName,
             HashSet<string> keepAsObjectFields,
@@ -149,15 +182,13 @@ namespace MongoToSqlEtl.Jobs
                 {
                     if (sourceItem == null) continue;
 
-                    var transformedItem = (sourceItem is ExpandoObject @object)
-                        ? @object
+                    var transformedItem = (sourceItem is ExpandoObject expando)
+                        ? expando
                         : ConvertToExando(sourceItem);
 
-                    // The TransformObject method is thread-safe with an internal lock.
                     var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
-                    // Reliably overwrite the foreign key with the provided name
                     newItemDict[foreignKeyName] = parentIdAsString;
                     results.Add(newItem);
                 }
@@ -165,12 +196,26 @@ namespace MongoToSqlEtl.Jobs
             return results;
         }
 
+        // FIX: ARGUMENT EXCEPTION: Use indexer instead of Add() to prevent crash on duplicate properties.
         private static ExpandoObject ConvertToExando(object obj)
         {
             var expando = new ExpandoObject();
             var dict = (IDictionary<string, object?>)expando;
-            foreach (var property in obj.GetType().GetProperties())
-                dict.Add(property.Name, property.GetValue(obj));
+
+            if (obj is BsonDocument bsonDoc)
+            {
+                foreach (var element in bsonDoc.Elements)
+                {
+                    dict[element.Name] = BsonSerializer.Deserialize<object>(element.Value.ToBsonDocument());
+                }
+            }
+            else
+            {
+                foreach (var property in obj.GetType().GetProperties())
+                {
+                    dict[property.Name] = property.GetValue(obj);
+                }
+            }
             return expando;
         }
 
@@ -185,11 +230,11 @@ namespace MongoToSqlEtl.Jobs
                 {
                     if (detail == null) continue;
 
-                    // The TransformObject method is now thread-safe with an internal lock.
-                    var targetDetail = DataTransformer.TransformObject((ExpandoObject)detail, cols);
+                    var expandoDetail = (detail is ExpandoObject exp) ? exp : ConvertToExando(detail);
+
+                    var targetDetail = DataTransformer.TransformObject(expandoDetail, cols);
                     var targetDict = (IDictionary<string, object?>)targetDetail;
 
-                    // Reliably overwrite the foreign key with the provided name
                     targetDict[foreignKeyName] = poItemDict["_id"];
                     results.Add(targetDetail);
                 }
