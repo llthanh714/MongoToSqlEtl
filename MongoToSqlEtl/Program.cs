@@ -78,7 +78,7 @@ try
 
     // Đăng ký các Job ETL
     // Dùng AddTransient để mỗi lần Hangfire chạy job, nó sẽ tạo một instance mới.
-    // builder.Services.AddSingleton<PatientOrdersEtlJob>();
+    builder.Services.AddTransient<PatientOrdersEtlJob>();
 
     // --- STEP 4: Cấu hình Hangfire ---
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
@@ -160,7 +160,7 @@ try
     // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
     RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
         "minutely-patientorder",
-        service => service.RunAsync(null), "* * * * *",
+        service => service.RunAsync(null), "*/2 * * * *",
             new RecurringJobOptions
             {
                 TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),

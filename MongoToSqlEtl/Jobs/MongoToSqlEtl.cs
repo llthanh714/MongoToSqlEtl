@@ -1,6 +1,7 @@
 ﻿using ETLBox;
 using ETLBox.DataFlow;
 using ETLBox.MongoDb;
+using Hangfire;
 using Hangfire.Console;
 using Hangfire.Server;
 using MongoDB.Bson;
@@ -41,6 +42,12 @@ namespace MongoToSqlEtl.Jobs
 
         protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context);
 
+        /// <summary>
+        /// Executes the ETL job.
+        /// This method is decorated with DisableConcurrentExecution to ensure that only one instance of this job
+        /// runs at any given time. The timeout is a safeguard to prevent deadlocks if a job instance crashes.
+        /// </summary>
+        [DisableConcurrentExecution(timeoutInSeconds: 15 * 60)] // (15 minutes)
         public async Task RunAsync(PerformContext? context)
         {
             int logId = 0;
