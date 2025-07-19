@@ -160,7 +160,7 @@ try
     // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
     RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
         "minutely-patientorder",
-        service => service.RunAsync(null), "*/2 * * * *",
+        service => service.RunAsync(null), "* * * * *",
             new RecurringJobOptions
             {
                 TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),

@@ -57,44 +57,75 @@ namespace MongoToSqlEtl.Common
             return (ExpandoObject)targetDict;
         }
 
-        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
+        // Dùng Lazy<T> để đảm bảo việc khởi tạo chỉ xảy ra một lần và thread-safe.
+        private static readonly Lazy<TimeZoneInfo> SEAsiaTimeZone = new(() =>
         {
-            if (source.TryGetValue(key, out object? value))
+            try
             {
-                if (value == null) { target[key] = DBNull.Value; return; }
-                if (value is DateTime utc)
-                {
-                    try { target[key] = TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time")); }
-                    catch (TimeZoneNotFoundException) { target[key] = utc.AddHours(7); }
-                }
-                else if (value is ObjectId oid) { target[key] = oid.ToString(); }
-                else if (value is IEnumerable enumerable && value is not string)
-                {
-                    bool isEmpty = enumerable is not ICollection collection
-                        ? !enumerable.Cast<object>().Any()
-                        : collection.Count == 0;
-
-                    if (isEmpty)
-                    {
-                        target[key] = DBNull.Value;
-                    }
-                    else
-                    {
-                        if (keepAsObjectFields != null && keepAsObjectFields.Contains(key))
-                        {
-                            // FIX: ACCESS VIOLATION: Do not copy the reference. Create a new list from the enumerable
-                            // to break the reference to the source object's internal collection, preventing memory corruption.
-                            target[key] = enumerable.Cast<object>().ToList();
-                        }
-                        else
-                        {
-                            target[key] = JsonSerializer.Serialize(value);
-                        }
-                    }
-                }
-                else { target[key] = value; }
+                // Thử tìm TimeZone ID của Windows trước
+                return TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time");
             }
-            else { target[key] = DBNull.Value; }
+            catch (TimeZoneNotFoundException)
+            {
+                // Nếu không được, thử tìm IANA ID (dùng trên Linux/macOS)
+                try
+                {
+                    return TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
+                }
+                catch (TimeZoneNotFoundException)
+                {
+                    // Nếu cả hai đều thất bại, tạo một múi giờ tùy chỉnh UTC+7 làm phương án cuối cùng.
+                    return TimeZoneInfo.CreateCustomTimeZone("SE Asia Custom", TimeSpan.FromHours(7), "SE Asia Standard Time (Custom)", "SE Asia Standard Time (Custom)");
+                }
+            }
+        });
+
+        public static void MapProperty(
+            IDictionary<string, object?> source,
+            IDictionary<string, object?> target,
+            string key,
+            HashSet<string>? keepAsObjectFields = null)
+        {
+            if (!source.TryGetValue(key, out object? value))
+            {
+                target[key] = DBNull.Value;
+                return;
+            }
+
+            // Sử dụng switch expression (C# 8.0+) để code sạch và dễ đọc hơn
+            target[key] = value switch
+            {
+                null => DBNull.Value,
+
+                DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
+
+                ObjectId oid => oid.ToString(),
+
+                string str => str, // Xử lý riêng trường hợp string để không bị coi là IEnumerable
+
+                IEnumerable enumerable => HandleEnumerable(enumerable, key, keepAsObjectFields),
+
+                _ => value // Các kiểu dữ liệu nguyên thủy khác (int, bool, double, etc.)
+            };
+        }
+
+        private static object HandleEnumerable(IEnumerable enumerable, string key, HashSet<string>? keepAsObjectFields)
+        {
+            // Kiểm tra xem enumerable có phần tử nào không
+            var firstItem = enumerable.Cast<object>().FirstOrDefault();
+            if (firstItem == null && !enumerable.Cast<object>().Any()) // Double check cho trường hợp list chứa 1 phần tử null
+            {
+                return DBNull.Value;
+            }
+
+            if (keepAsObjectFields != null && keepAsObjectFields.Contains(key))
+            {
+                // Vẫn giữ logic quan trọng: tạo list mới để phá vỡ tham chiếu
+                return enumerable.Cast<object>().ToList();
+            }
+
+            // Serialize thành JSON cho các trường hợp còn lại
+            return JsonSerializer.Serialize(enumerable);
         }
     }
 }

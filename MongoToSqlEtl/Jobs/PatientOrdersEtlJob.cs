@@ -8,7 +8,6 @@ using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
-using Serilog;
 using System.Dynamic;
 
 namespace MongoToSqlEtl.Jobs
