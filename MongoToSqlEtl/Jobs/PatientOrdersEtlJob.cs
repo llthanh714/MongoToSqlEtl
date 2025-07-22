@@ -165,13 +165,12 @@ namespace MongoToSqlEtl.Jobs
                     var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
-                    // FIX: Check if the foreign key already exists before adding it.
+                    // FIX: Chỉ thêm khóa ngoại nếu nó chưa tồn tại
                     if (!newItemDict.ContainsKey(foreignKeyName))
                     {
                         newItemDict[foreignKeyName] = parentIdAsString;
                     }
 
-                    newItemDict[foreignKeyName] = parentIdAsString;
                     results.Add(newItem);
                 }
             }
