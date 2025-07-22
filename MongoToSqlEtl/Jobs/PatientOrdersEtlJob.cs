@@ -4,11 +4,12 @@ using ETLBox.DataFlow;
 using Hangfire.Console;
 using Hangfire.Server;
 using MongoDB.Bson;
-using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
+using Serilog;
 using System.Dynamic;
+using System.Text.Json;
 
 namespace MongoToSqlEtl.Jobs
 {
@@ -19,10 +20,10 @@ namespace MongoToSqlEtl.Jobs
     {
         protected override string SourceCollectionName => "patientorders";
         protected override string MongoDatabaseName => "arcusairdb";
-        private const string DestPatientOrdersTable = "patientorders";
-        private const string DestPatientOrderItemsTable = "patientorderitems";
-        private const string DestPatientDiagnosisuidsTable = "patientdiagnosisuids";
-        private const string DestDispenseBatchDetailTable = "dispensebatchdetail";
+        private const string DestPatientOrdersTable = "stg_patientorders";
+        private const string DestPatientOrderItemsTable = "stg_patientorderitems";
+        private const string DestPatientDiagnosisuidsTable = "stg_patientdiagnosisuids";
+        private const string DestDispenseBatchDetailTable = "stg_dispensebatchdetail";
 
         public new async Task RunAsync(PerformContext? context)
         {
@@ -54,16 +55,19 @@ namespace MongoToSqlEtl.Jobs
             var flattenDispenseBatchDetails = CreateDispenseBatchDetailsTransformation([.. dispensebatchdetailDef.Columns.Select(c => c.Name)]);
 
             // Create destination components
-            var destPatientOrders = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrdersTable);
-            var destPatientOrderItems = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrderItemsTable);
-            var destPatientDiagnosisUids = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientDiagnosisuidsTable);
-            var destDispenseBatchDetail = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestDispenseBatchDetailTable);
+            //var destPatientOrders = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrdersTable);
+            //var destPatientOrderItems = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientOrderItemsTable);
+            //var destPatientDiagnosisUids = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestPatientDiagnosisuidsTable);
+            //var destDispenseBatchDetail = DataTransformer.CreateDbMergeDestination(SqlConnectionManager, DestDispenseBatchDetailTable);
+
+            var destPatientOrders = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientOrdersTable };
+            var destPatientOrderItems = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientOrderItemsTable };
+            var destPatientDiagnosisUids = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientDiagnosisuidsTable };
+            var destDispenseBatchDetail = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestDispenseBatchDetailTable };
 
             // Create multicast components
             var multicastOrders = new Multicast<ExpandoObject>();
             var multicastNormalizedItems = new Multicast<ExpandoObject>();
-
-            // FIX: CRASH RISK: Link errors from ALL components to the error handler
 
             // Main flow from source
             source.LinkTo(multicastOrders);
@@ -103,7 +107,8 @@ namespace MongoToSqlEtl.Jobs
             return new EtlPipeline(
                 Source: source,
                 Destinations: [destPatientOrders, destPatientOrderItems, destPatientDiagnosisUids, destDispenseBatchDetail],
-                ErrorDestination: logErrors
+                ErrorDestination: logErrors,
+                SqlStoredProcedureName: "sp_MergePatientOrdersData"
             );
         }
 
@@ -153,6 +158,12 @@ namespace MongoToSqlEtl.Jobs
                         ? expando
                         : ConvertToExando(sourceItem);
 
+                    if (transformedItem == null)
+                    {
+                        Log.Warning("Skipping null transformed item in {ArrayFieldName} for parent ID {ParentId}", arrayFieldName, parentIdAsString);
+                        continue;
+                    }
+
                     var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
@@ -163,27 +174,32 @@ namespace MongoToSqlEtl.Jobs
             return results;
         }
 
-        // FIX: ARGUMENT EXCEPTION: Use indexer instead of Add() to prevent crash on duplicate properties.
-        private static ExpandoObject ConvertToExando(object obj)
+        private static ExpandoObject? ConvertToExando(object obj)
         {
-            var expando = new ExpandoObject();
-            var dict = (IDictionary<string, object?>)expando;
+            try
+            {
+                // BsonDocument có phương thức .ToJson() để chuyển đổi hiệu quả.
+                if (obj is BsonDocument bsonDoc)
+                {
+                    // Chuyển BsonDocument thành chuỗi JSON, sau đó deserialize thành ExpandoObject.
+                    // Sử dụng các tùy chọn để đảm bảo định dạng JSON chuẩn, dễ đọc bởi System.Text.Json.
+                    var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
+                    var expando = JsonSerializer.Deserialize<ExpandoObject>(json);
+                    return expando;
+                }
 
-            if (obj is BsonDocument bsonDoc)
-            {
-                foreach (var element in bsonDoc.Elements)
-                {
-                    dict[element.Name] = BsonSerializer.Deserialize<object>(element.Value.ToBsonDocument());
-                }
+                // Đối với các loại object khác (ví dụ: các kiểu anonymous), serialize trực tiếp.
+                var generalJson = JsonSerializer.Serialize(obj);
+                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
+                return generalExpando;
             }
-            else
+            catch (Exception ex)
             {
-                foreach (var property in obj.GetType().GetProperties())
-                {
-                    dict[property.Name] = property.GetValue(obj);
-                }
+                // Ghi lại log nếu có lỗi xảy ra trong quá trình chuyển đổi.
+                // Điều này giúp chẩn đoán các vấn đề về dữ liệu không mong muốn.
+                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}", obj?.GetType().FullName ?? "null");
+                return null;
             }
-            return expando;
         }
 
         private static List<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols, string foreignKeyName)

@@ -17,8 +17,8 @@ Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .Enrich.FromLogContext()
     .WriteTo.Console()
-    .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
-        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+    //.WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
+    //    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
 try
@@ -166,6 +166,8 @@ try
                 TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),
             }
     );
+
+    // BackgroundJob.Enqueue<PatientOrdersEtlJob>(service => service.RunAsync(null));
 
     Log.Information("Application initialization completed. Hangfire Dashboard is running at /etl.");
 

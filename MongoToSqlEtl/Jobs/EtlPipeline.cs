@@ -11,6 +11,7 @@ namespace MongoToSqlEtl.Jobs
     public record EtlPipeline(
         IDataFlowSource<ExpandoObject> Source,
         IEnumerable<IDataFlowDestination<ExpandoObject>> Destinations,
-        CustomDestination<ETLBoxError> ErrorDestination
+        CustomDestination<ETLBoxError> ErrorDestination,
+        string SqlStoredProcedureName
     );
 }

@@ -1,4 +1,5 @@
 ﻿using ETLBox;
+using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
 using ETLBox.MongoDb;
 using Hangfire;
@@ -25,11 +26,11 @@ namespace MongoToSqlEtl.Jobs
         // Danh sách để thu thập các ID bị lỗi trong lần chạy hiện tại
         protected List<string> CurrentRunFailedIds { get; } = [];
         // Object lock để đảm bảo an toàn luồng khi thêm vào danh sách lỗi
-        private readonly object _failedIdsLock = new();
+        // private readonly object _failedIdsLock = new();
 
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 30;
+        protected virtual int MaxBatchIntervalInMinutes => 60;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -80,6 +81,18 @@ namespace MongoToSqlEtl.Jobs
 
                 await Network.ExecuteAsync(pipeline.Source);
 
+                // FIX: ROBUSTNESS: Ensure that the destination is not null before proceeding.
+                if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
+                {
+                    var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}")
+                    {
+                        ConnectionManager = SqlConnectionManager,
+                        DisableLogging = true
+                    };
+
+                    await mergeDataTask.ExecuteNonQueryAsync();
+                }
+
                 context?.WriteLine("Network execution has finished.");
                 Log.Information("Network execution finished for job '{JobName}'.", SourceCollectionName);
 
@@ -87,7 +100,7 @@ namespace MongoToSqlEtl.Jobs
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
                 long failedCount = pipeline.ErrorDestination.ProgressCount;
 
-                context?.WriteLine($"Summary -- Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
+                context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
                 // Gửi một thông báo tổng hợp nếu có lỗi
@@ -202,15 +215,17 @@ namespace MongoToSqlEtl.Jobs
                             else
                             {
                                 context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
-                                Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
+                                // Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
 
                                 FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
 
+                                CurrentRunFailedIds.Add(recordId);
+
                                 // Use lock to ensure thread safety when adding to the list
-                                lock (_failedIdsLock)
-                                {
-                                    CurrentRunFailedIds.Add(recordId);
-                                }
+                                //lock (_failedIdsLock)
+                                //{
+                                //    CurrentRunFailedIds.Add(recordId);
+                                //}
                             }
                         }
 

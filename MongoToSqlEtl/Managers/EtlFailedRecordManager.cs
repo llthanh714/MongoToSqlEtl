@@ -1,6 +1,8 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
+using Microsoft.Data.SqlClient;
 using Serilog;
+using System.Data;
 
 namespace MongoToSqlEtl.Managers
 {
@@ -11,8 +13,13 @@ namespace MongoToSqlEtl.Managers
             var ids = new List<string>();
             try
             {
-                var sql = $"SELECT FailedRecordId FROM __ETLFailedRecords WHERE SourceCollectionName = '{sourceCollectionName}' AND Status = 'Pending'";
-                var task = new SqlTask(sql)
+                var sql = "SELECT FailedRecordId FROM __ETLFailedRecords WHERE SourceCollectionName = @sourceCollectionName AND Status = 'Pending'";
+                var parameters = new List<QueryParameter>
+                {
+                    new("sourceCollectionName", sourceCollectionName)
+                };
+
+                var task = new SqlTask(sql, parameters)
                 {
                     ConnectionManager = connectionManager,
                     Actions = [id => ids.Add(id.ToString()!)]
@@ -26,23 +33,30 @@ namespace MongoToSqlEtl.Managers
 
         public void LogFailedRecord(string recordId, string errorMessage)
         {
-            var sanitizedErrorMessage = errorMessage.Replace("'", "''");
-            var sql = $@"
+            var sql = @"
                 MERGE __ETLFailedRecords AS target
-                USING (SELECT '{sourceCollectionName}' AS SourceCollectionName, '{recordId}' AS FailedRecordId) AS source
+                USING (SELECT @sourceCollectionName AS SourceCollectionName, @failedRecordId AS FailedRecordId) AS source
                 ON (target.SourceCollectionName = source.SourceCollectionName AND target.FailedRecordId = source.FailedRecordId)
                 WHEN MATCHED THEN
                     UPDATE SET
                         Status = 'Pending',
-                        ErrorMessage = '{sanitizedErrorMessage}',
+                        ErrorMessage = @errorMessage,
                         LoggedAtUtc = GETUTCDATE(),
                         ResolvedAtUtc = NULL
                 WHEN NOT MATCHED THEN
                     INSERT (SourceCollectionName, FailedRecordId, ErrorMessage, Status)
-                    VALUES (source.SourceCollectionName, source.FailedRecordId, '{sanitizedErrorMessage}', 'Pending');";
+                    VALUES (@sourceCollectionName, @failedRecordId, @errorMessage, 'Pending');";
+
+            var parameters = new List<QueryParameter>
+            {
+                new("sourceCollectionName", sourceCollectionName),
+                new("failedRecordId", recordId),
+                new("errorMessage", errorMessage)
+            };
+
             try
             {
-                SqlTask.ExecuteNonQuery(connectionManager, sql);
+                SqlTask.ExecuteNonQuery(connectionManager, sql, parameters);
             }
             catch (Exception ex) { Log.Error(ex, "[FailedManager] Could not log failed record ID: {RecordId}", recordId); }
         }
@@ -51,22 +65,47 @@ namespace MongoToSqlEtl.Managers
         {
             if (recordIds.Count == 0) return;
 
-            var formattedIds = string.Join(",", recordIds.Select(id => $"'{id}'"));
-            var sql = $@"
-                UPDATE __ETLFailedRecords
+            // FATAL ERROR FIX: Use raw ADO.NET to correctly handle Table-Valued Parameters (TVP),
+            // bypassing potential issues with the ETLBox abstraction layer.
+            var sql = @"
+                UPDATE target
                 SET Status = 'Resolved',
                     ResolvedAtUtc = GETUTCDATE()
-                WHERE SourceCollectionName = '{sourceCollectionName}'
-                  AND FailedRecordId IN ({formattedIds})
-                  AND Status = 'Pending';";
+                FROM __ETLFailedRecords AS target
+                INNER JOIN @idList AS source ON target.FailedRecordId = source.Value
+                WHERE target.SourceCollectionName = @sourceCollectionName
+                  AND target.Status = 'Pending';";
+
+            var idTable = new DataTable();
+            idTable.Columns.Add("Value", typeof(string));
+            foreach (var id in recordIds)
+            {
+                idTable.Rows.Add(id);
+            }
+
             try
             {
-                int count = SqlTask.ExecuteNonQuery(connectionManager, sql);
+                // FIX: Instead of cloning the connection manager, which caused access issues,
+                // create a new SqlConnection directly from the connection string.
+                // This is a more robust way to interact with ADO.NET directly.
+                string? connectionString = connectionManager.ConnectionString.Value;
+                using var conn = new SqlConnection(connectionString);
+                conn.Open();
+                using var cmd = new SqlCommand(sql, conn);
+
+                cmd.Parameters.AddWithValue("@sourceCollectionName", sourceCollectionName);
+
+                // Explicitly define the Table-Valued Parameter
+                var tvpParam = cmd.Parameters.AddWithValue("@idList", idTable);
+                tvpParam.SqlDbType = SqlDbType.Structured;
+                tvpParam.TypeName = "dbo.udtt_StringList"; // Ensure this matches the type name in SQL Server
+
+                int count = cmd.ExecuteNonQuery();
                 Log.Information("[FailedManager] Marked {Count} previously pending records as 'Resolved'.", count);
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "[FailedManager] Could not mark records as resolved.");
+                Log.Error(ex, "[FailedManager] Could not mark records as resolved using TVP.");
             }
         }
     }

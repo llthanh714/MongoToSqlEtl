@@ -16,9 +16,9 @@ namespace MongoToSqlEtl.Common
         {
             return new DbMerge<ExpandoObject>(conn, tableName)
             {
-                MergeMode = MergeMode.InsertsAndUpdates,
+                MergeMode = MergeMode.InsertsOnly,
                 IdColumns = [new IdColumn { IdPropertyName = "_id" }],
-                BatchSize = 500
+                // BatchSize = 500
             };
         }
 
@@ -86,27 +86,34 @@ namespace MongoToSqlEtl.Common
             string key,
             HashSet<string>? keepAsObjectFields = null)
         {
-            if (!source.TryGetValue(key, out object? value))
+            if (target.ContainsKey(key))
             {
-                target[key] = DBNull.Value;
                 return;
             }
-
-            // Sử dụng switch expression (C# 8.0+) để code sạch và dễ đọc hơn
-            target[key] = value switch
+            else
             {
-                null => DBNull.Value,
+                if (!source.TryGetValue(key, out object? value))
+                {
+                    target[key] = DBNull.Value;
+                    return;
+                }
 
-                DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
+                // Sử dụng switch expression (C# 8.0+) để code sạch và dễ đọc hơn
+                target[key] = value switch
+                {
+                    null => DBNull.Value,
 
-                ObjectId oid => oid.ToString(),
+                    DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
 
-                string str => str, // Xử lý riêng trường hợp string để không bị coi là IEnumerable
+                    ObjectId oid => oid.ToString(),
 
-                IEnumerable enumerable => HandleEnumerable(enumerable, key, keepAsObjectFields),
+                    string str => str, // Xử lý riêng trường hợp string để không bị coi là IEnumerable
 
-                _ => value // Các kiểu dữ liệu nguyên thủy khác (int, bool, double, etc.)
-            };
+                    IEnumerable enumerable => HandleEnumerable(enumerable, key, keepAsObjectFields),
+
+                    _ => value // Các kiểu dữ liệu nguyên thủy khác (int, bool, double, etc.)
+                };
+            }
         }
 
         private static object HandleEnumerable(IEnumerable enumerable, string key, HashSet<string>? keepAsObjectFields)
