@@ -114,7 +114,6 @@ namespace MongoToSqlEtl.Jobs
 
         #region Transformation Logic Specific to PatientOrders
 
-        // Renamed from CreateFlattenAndNormalizeComponent for clarity
         private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndNormalizeObjectsComponent(string arrayFieldName, HashSet<string> keepAsObjectFields)
         {
             var localArrayFieldName = arrayFieldName;
@@ -134,7 +133,6 @@ namespace MongoToSqlEtl.Jobs
             return new RowMultiplication<ExpandoObject, ExpandoObject>(itemRow => FlattenAndTransformDispenseBatchDetail(itemRow, localCols, "patientorderitemsuid"));
         }
 
-        // Renamed from FlattenAndNormalizeItems for clarity
         private static List<ExpandoObject> FlattenAndNormalizeObjects(
             ExpandoObject parentRow,
             string arrayFieldName,
@@ -167,8 +165,47 @@ namespace MongoToSqlEtl.Jobs
                     var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
+                    // FIX: Check if the foreign key already exists before adding it.
+                    if (!newItemDict.ContainsKey(foreignKeyName))
+                    {
+                        newItemDict[foreignKeyName] = parentIdAsString;
+                    }
+
                     newItemDict[foreignKeyName] = parentIdAsString;
                     results.Add(newItem);
+                }
+            }
+            return results;
+        }
+
+        private static List<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols, string foreignKeyName)
+        {
+            var results = new List<ExpandoObject>();
+            var poItemDict = (IDictionary<string, object?>)poItemRow;
+
+            if (poItemDict.TryGetValue("dispensebatchdetail", out object? val) && val is IEnumerable<object> details)
+            {
+                foreach (object? detail in details)
+                {
+                    if (detail == null) continue;
+
+                    var expandoDetail = (detail is ExpandoObject exp) ? exp : ConvertToExando(detail);
+
+                    if (expandoDetail == null)
+                    {
+                        Log.Warning("Skipping null ExpandoObject in dispensebatchdetail for patientorderitemsuid");
+                        continue;
+                    }
+
+                    var targetDetail = DataTransformer.TransformObject(expandoDetail, cols);
+                    var targetDict = (IDictionary<string, object?>)targetDetail;
+
+                    if (poItemDict.TryGetValue("_id", out var poItemId) && poItemId != null)
+                    {
+                        targetDict[foreignKeyName] = poItemId;
+                    }
+
+                    results.Add(targetDetail);
                 }
             }
             return results;
@@ -200,33 +237,6 @@ namespace MongoToSqlEtl.Jobs
                 Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}", obj?.GetType().FullName ?? "null");
                 return null;
             }
-        }
-
-        private static List<ExpandoObject> FlattenAndTransformDispenseBatchDetail(ExpandoObject poItemRow, ICollection<string> cols, string foreignKeyName)
-        {
-            var results = new List<ExpandoObject>();
-            var poItemDict = (IDictionary<string, object?>)poItemRow;
-
-            if (poItemDict.TryGetValue("dispensebatchdetail", out object? val) && val is IEnumerable<object> details)
-            {
-                foreach (object? detail in details)
-                {
-                    if (detail == null) continue;
-
-                    var expandoDetail = (detail is ExpandoObject exp) ? exp : ConvertToExando(detail);
-
-                    var targetDetail = DataTransformer.TransformObject(expandoDetail, cols);
-                    var targetDict = (IDictionary<string, object?>)targetDetail;
-
-                    if (poItemDict.TryGetValue("_id", out var poItemId) && poItemId != null)
-                    {
-                        targetDict[foreignKeyName] = poItemId;
-                    }
-
-                    results.Add(targetDetail);
-                }
-            }
-            return results;
         }
 
         #endregion

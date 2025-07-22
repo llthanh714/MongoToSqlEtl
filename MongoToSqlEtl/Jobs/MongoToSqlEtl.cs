@@ -10,6 +10,7 @@ using MongoDB.Driver;
 using MongoToSqlEtl.Managers;
 using MongoToSqlEtl.Services;
 using Serilog;
+using System.Collections.Concurrent;
 using System.Dynamic;
 using System.Text.Json;
 
@@ -23,14 +24,13 @@ namespace MongoToSqlEtl.Jobs
         protected readonly EtlLogManager LogManager;
         protected readonly EtlFailedRecordManager FailedRecordManager;
 
-        // Danh sách để thu thập các ID bị lỗi trong lần chạy hiện tại
-        protected List<string> CurrentRunFailedIds { get; } = [];
-        // Object lock để đảm bảo an toàn luồng khi thêm vào danh sách lỗi
-        // private readonly object _failedIdsLock = new();
+        // ROBUSTNESS FIX: Use ConcurrentBag for thread-safe collection of failed IDs.
+        // This avoids potential race conditions when the error destination is called from multiple threads.
+        protected ConcurrentBag<string> CurrentRunFailedIds { get; private set; } = [];
 
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 60;
+        protected virtual int MaxBatchIntervalInMinutes => 120;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -53,7 +53,9 @@ namespace MongoToSqlEtl.Jobs
         {
             int logId = 0;
             List<string> pendingFailedRecordIds = [];
-            CurrentRunFailedIds.Clear(); // Xóa danh sách lỗi của lần chạy trước
+
+            // Re-initialize the bag for the new run.
+            CurrentRunFailedIds = [];
 
             try
             {
@@ -81,7 +83,7 @@ namespace MongoToSqlEtl.Jobs
 
                 await Network.ExecuteAsync(pipeline.Source);
 
-                // FIX: ROBUSTNESS: Ensure that the destination is not null before proceeding.
+                // ROBUSTNESS FIX: Ensure that the error destination is always created, even if no errors are expected.
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
                     var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}")
@@ -103,15 +105,13 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
 
-                // Gửi một thông báo tổng hợp nếu có lỗi
-                if (CurrentRunFailedIds.Count != 0)
+                var failedIdsList = CurrentRunFailedIds.ToList();
+                if (failedIdsList.Count != 0)
                 {
-                    await NotificationService.SendFailedRecordsSummaryAsync(SourceCollectionName, CurrentRunFailedIds);
+                    await NotificationService.SendFailedRecordsSummaryAsync(SourceCollectionName, failedIdsList);
                 }
 
-                // FIX: DATA INTEGRITY: Only mark records as resolved if they were in the initial pending list
-                // AND did not fail again in the current run.
-                var successfullyRetriedIds = pendingFailedRecordIds.Except(CurrentRunFailedIds).ToList();
+                var successfullyRetriedIds = pendingFailedRecordIds.Except(failedIdsList).ToList();
                 if (successfullyRetriedIds.Count > 0)
                 {
                     FailedRecordManager.MarkRecordsAsResolved(successfullyRetriedIds);
@@ -144,8 +144,6 @@ namespace MongoToSqlEtl.Jobs
 
             if (failedIds.Count != 0)
             {
-                // FIX: FORMAT EXCEPTION: Validate that the ID is a valid ObjectId before trying to convert.
-                // This prevents crashes if an invalid ID (like "INVALID_JSON_RECORD") is in the failed records table.
                 var objectIds = failedIds
                     .Where(id => ObjectId.TryParse(id, out _))
                     .Select(id => new ObjectId(id))
@@ -188,7 +186,6 @@ namespace MongoToSqlEtl.Jobs
             {
                 WriteAction = (error, rowIndex) =>
                 {
-                    // FIX: ROBUSTNESS: Add a top-level try-catch to prevent the error logging itself from crashing the app.
                     try
                     {
                         var exception = error.GetException();
@@ -215,17 +212,8 @@ namespace MongoToSqlEtl.Jobs
                             else
                             {
                                 context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
-                                // Log.Warning(exception, "Data Row Error. ID: {RecordId}, Data: {@ErrorRecord}", recordId, recordDict);
-
                                 FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-
                                 CurrentRunFailedIds.Add(recordId);
-
-                                // Use lock to ensure thread safety when adding to the list
-                                //lock (_failedIdsLock)
-                                //{
-                                //    CurrentRunFailedIds.Add(recordId);
-                                //}
                             }
                         }
 

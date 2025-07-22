@@ -80,6 +80,53 @@ namespace MongoToSqlEtl.Common
             }
         });
 
+        /// <summary>
+        /// Handles the conversion of a JsonElement to a database-friendly type.
+        /// </summary>
+        private static object HandleJsonElement(JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.String:
+                    if (element.TryGetDateTime(out var dt))
+                        return dt;
+                    // FIX: Cast the string to object? to make it compatible with DBNull.Value for the ?? operator.
+                    return (object?)element.GetString() ?? DBNull.Value;
+                case JsonValueKind.Number:
+                    return element.GetDecimal();
+                case JsonValueKind.True:
+                    return true;
+                case JsonValueKind.False:
+                    return false;
+                case JsonValueKind.Null:
+                    return DBNull.Value;
+
+                // For complex types, we check for specific BSON patterns or serialize to string.
+                case JsonValueKind.Object:
+                    // Check for BSON ObjectId pattern: {"$oid": "..."}
+                    if (element.TryGetProperty("$oid", out var oidElement))
+                    {
+                        return (object?)oidElement.GetString() ?? DBNull.Value;
+                    }
+                    // Check for BSON Date pattern: {"$date": "..."}
+                    if (element.TryGetProperty("$date", out var dateElement) && dateElement.TryGetDateTime(out var bsonDate))
+                    {
+                        return bsonDate;
+                    }
+                    // If it's another type of object (like the one in the error message for an _id),
+                    // convert it to a JSON string to be stored in nvarchar. This solves the InvalidCastException.
+                    return element.GetRawText();
+
+                case JsonValueKind.Array:
+                    // Convert array to a JSON string.
+                    return element.GetRawText();
+
+                default:
+                    // Fallback for any other type.
+                    return element.ToString();
+            }
+        }
+
         public static void MapProperty(
             IDictionary<string, object?> source,
             IDictionary<string, object?> target,
@@ -90,30 +137,25 @@ namespace MongoToSqlEtl.Common
             {
                 return;
             }
-            else
+
+            if (!source.TryGetValue(key, out object? value))
             {
-                if (!source.TryGetValue(key, out object? value))
-                {
-                    target[key] = DBNull.Value;
-                    return;
-                }
-
-                // Sử dụng switch expression (C# 8.0+) để code sạch và dễ đọc hơn
-                target[key] = value switch
-                {
-                    null => DBNull.Value,
-
-                    DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
-
-                    ObjectId oid => oid.ToString(),
-
-                    string str => str, // Xử lý riêng trường hợp string để không bị coi là IEnumerable
-
-                    IEnumerable enumerable => HandleEnumerable(enumerable, key, keepAsObjectFields),
-
-                    _ => value // Các kiểu dữ liệu nguyên thủy khác (int, bool, double, etc.)
-                };
+                target[key] = DBNull.Value;
+                return;
             }
+
+            // FIX: The switch expression is updated to handle JsonElement correctly,
+            // preventing cast errors when writing to the database.
+            target[key] = value switch
+            {
+                null => DBNull.Value,
+                DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
+                ObjectId oid => oid.ToString(),
+                JsonElement jsonElem => HandleJsonElement(jsonElem), // Handle JsonElement before other types
+                string str => str,
+                IEnumerable enumerable when value is not string => HandleEnumerable(enumerable, key, keepAsObjectFields),
+                _ => value
+            };
         }
 
         private static object HandleEnumerable(IEnumerable enumerable, string key, HashSet<string>? keepAsObjectFields)
