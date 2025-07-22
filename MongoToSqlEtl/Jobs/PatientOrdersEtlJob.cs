@@ -162,14 +162,10 @@ namespace MongoToSqlEtl.Jobs
                         continue;
                     }
 
-                    var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields);
+                    var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields, excludeKeys: [foreignKeyName]);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
-                    // FIX: Chỉ thêm khóa ngoại nếu nó chưa tồn tại
-                    if (!newItemDict.ContainsKey(foreignKeyName))
-                    {
-                        newItemDict[foreignKeyName] = parentIdAsString;
-                    }
+                    newItemDict.Add(foreignKeyName, parentIdAsString);
 
                     results.Add(newItem);
                 }

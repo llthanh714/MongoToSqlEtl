@@ -27,32 +27,41 @@ namespace MongoToSqlEtl.Common
             return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns, keepAsObjectFields));
         }
 
-        public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
+        public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null, HashSet<string>? excludeKeys = null)
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
             var targetDict = (IDictionary<string, object?>)new ExpandoObject();
 
-            // If target columns are specified, map only those.
             if (targetColumns.Count != 0)
             {
                 foreach (var columnName in targetColumns)
                 {
+                    // Thêm logic kiểm tra excludeKeys ở đây nếu cần, nhưng trường hợp chính là ở vòng lặp 'else'
+                    if (excludeKeys != null && excludeKeys.Contains(columnName)) continue;
                     MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
                 }
             }
-            // Otherwise, map all columns from the source.
             else
             {
                 foreach (var key in sourceAsDict.Keys)
                 {
+                    // -- DÒNG MỚI --
+                    // Bỏ qua các key nằm trong danh sách loại trừ
+                    if (excludeKeys != null && excludeKeys.Contains(key))
+                    {
+                        continue;
+                    }
                     MapProperty(sourceAsDict, targetDict, key, keepAsObjectFields);
                 }
             }
 
-            // Always ensure the _id column is mapped if it exists in the source
             if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
             {
-                MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
+                // Đảm bảo khóa bị loại trừ cũng không được thêm lại ở đây
+                if (excludeKeys == null || !excludeKeys.Contains("_id"))
+                {
+                    MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
+                }
             }
             return (ExpandoObject)targetDict;
         }
