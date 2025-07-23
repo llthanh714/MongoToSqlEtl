@@ -87,7 +87,12 @@ namespace MongoToSqlEtl.Jobs
 
                 await Network.ExecuteAsync(pipeline.Source);
 
-                // ROBUSTNESS FIX: Ensure that the error destination is always created, even if no errors are expected.
+                // Đợi cho đến khi TẤT CẢ các thành phần trong pipeline hoàn thành.
+                // await Task.WhenAll(pipeline.Source.Completion,
+                //                   pipeline.ErrorDestination.Completion,
+                //                   Task.WhenAll(pipeline.Destinations.Select(d => d.Completion)));
+
+                // Ensure that the error destination is always created, even if no errors are expected.
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
                     var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}")

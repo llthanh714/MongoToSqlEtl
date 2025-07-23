@@ -13,7 +13,7 @@ namespace MongoToSqlEtl.Managers
             var ids = new List<string>();
             try
             {
-                var sql = "SELECT FailedRecordId FROM __ETLFailedRecords WHERE SourceCollectionName = @sourceCollectionName AND Status = 'Pending'";
+                var sql = "SELECT FailedRecordId FROM __ETLFailedRecords WHERE SourceCollectionName = @sourceCollectionName AND Status = 'Pending' AND RetryCount < 3";
                 var parameters = new List<QueryParameter>
                 {
                     new("sourceCollectionName", sourceCollectionName)
@@ -42,7 +42,8 @@ namespace MongoToSqlEtl.Managers
                         Status = 'Pending',
                         ErrorMessage = @errorMessage,
                         LoggedAtUtc = GETUTCDATE(),
-                        ResolvedAtUtc = NULL
+                        ResolvedAtUtc = NULL,
+                        RetryCount = target.RetryCount + 1
                 WHEN NOT MATCHED THEN
                     INSERT (SourceCollectionName, FailedRecordId, ErrorMessage, Status)
                     VALUES (@sourceCollectionName, @failedRecordId, @errorMessage, 'Pending');";
