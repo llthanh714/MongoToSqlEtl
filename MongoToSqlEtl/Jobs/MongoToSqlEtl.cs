@@ -12,7 +12,6 @@ using MongoToSqlEtl.Managers;
 using MongoToSqlEtl.Services;
 using Serilog;
 using System.Collections.Concurrent;
-using System.ComponentModel.DataAnnotations;
 using System.Data;
 using System.Dynamic;
 using System.Text.Json;
