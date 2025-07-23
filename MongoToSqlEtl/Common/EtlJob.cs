@@ -45,12 +45,13 @@ namespace MongoToSqlEtl.Common
             {
                 foreach (var key in sourceAsDict.Keys)
                 {
-                    // -- DÒNG MỚI --
-                    // Bỏ qua các key nằm trong danh sách loại trừ
-                    if (excludeKeys != null && excludeKeys.Contains(key))
-                    {
+                    var exclusionSet = excludeKeys != null
+                        ? new HashSet<string>(excludeKeys, StringComparer.OrdinalIgnoreCase)
+                        : null;
+
+                    if (exclusionSet != null && exclusionSet.Contains(key))
                         continue;
-                    }
+
                     MapProperty(sourceAsDict, targetDict, key, keepAsObjectFields);
                 }
             }

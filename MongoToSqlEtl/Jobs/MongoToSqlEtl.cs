@@ -5,12 +5,15 @@ using ETLBox.MongoDb;
 using Hangfire;
 using Hangfire.Console;
 using Hangfire.Server;
+using Microsoft.Data.SqlClient;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MongoToSqlEtl.Managers;
 using MongoToSqlEtl.Services;
 using Serilog;
 using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
+using System.Data;
 using System.Dynamic;
 using System.Text.Json;
 
@@ -27,7 +30,7 @@ namespace MongoToSqlEtl.Jobs
         // ROBUSTNESS FIX: Use ConcurrentBag for thread-safe collection of failed IDs.
         // This avoids potential race conditions when the error destination is called from multiple threads.
         protected ConcurrentBag<string> CurrentRunFailedIds { get; private set; } = [];
-
+        protected abstract List<string> StagingTables { get; }
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
         protected virtual int MaxBatchIntervalInMinutes => 120;
@@ -75,6 +78,8 @@ namespace MongoToSqlEtl.Jobs
 
                 pendingFailedRecordIds = FailedRecordManager.GetPendingFailedRecordIds();
                 logId = LogManager.StartNewLogEntry(lastSuccessfulRun, endDate);
+
+                await TruncateStagingTablesAsync(context);
 
                 var pipeline = BuildPipeline(lastSuccessfulRun, endDate, pendingFailedRecordIds, context);
 
@@ -197,49 +202,93 @@ namespace MongoToSqlEtl.Jobs
                             return;
                         }
 
-                        void ProcessSingleRecord(IDictionary<string, object?> recordDict)
+                        // Hàm nội tuyến để xử lý ghi log cho một record
+                        void LogSingleRecordFailure(IDictionary<string, object?> recordDict, string reason)
                         {
-                            string? recordId = null;
                             if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
                             {
-                                recordId = idValue.ToString();
-                            }
+                                string? recordId = idValue.ToString();
+                                context?.WriteLine($"Data Row Error. ID: {recordId}. Reason: {reason}");
 
-                            if (string.IsNullOrEmpty(recordId) || recordId == "[]")
-                            {
-                                Log.Warning(exception, "Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
+                                if (!string.IsNullOrEmpty(recordId))
+                                {
+                                    Log.Warning("Data Row Error. ID: {RecordId}. Reason: {Reason}", recordId, reason);
+                                    FailedRecordManager.LogFailedRecord(recordId, reason);
+                                    CurrentRunFailedIds.Add(recordId);
+                                }
+                                else
+                                {
+                                    Log.Warning("Data Row Error. No valid ID found in the record. Reason: {Reason}", reason);
+                                }
                             }
                             else
                             {
-                                context?.WriteLine($"Data Row Error. ID: {recordId}. Error: {exception.Message}");
-                                FailedRecordManager.LogFailedRecord(recordId, exception.ToString());
-                                CurrentRunFailedIds.Add(recordId);
+                                Log.Warning("Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
                             }
                         }
 
-                        try
+                        using var jsonDoc = JsonDocument.Parse(json);
+                        if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
                         {
-                            using var jsonDoc = JsonDocument.Parse(json);
-                            if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
+                            // === LOGIC MỚI: XỬ LÝ LỖI THEO LÔ THÔNG MINH HƠN ===
+                            Log.Warning(exception, "A data batch failed to write to SQL Server. Initiating re-validation to find specific culprits...");
+                            var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
+                            if (records == null || records.Count == 0) return;
+
+                            // Chỉ lấy TableDefinition một lần cho cả lô (giả định lô thuộc 1 bảng)
+                            // Đây là một giả định hợp lý cho hầu hết các luồng ETL
+                            var firstRecord = records.First() as IDictionary<string, object?>;
+                            string? tableName = firstRecord?.FirstOrDefault(kvp => kvp.Key.StartsWith("stg_")).Key;
+
+                            // Nếu không xác định được bảng, ghi log chung cho tất cả
+                            if (tableName == null)
                             {
-                                Log.Warning(exception, "Error occurred on a data batch. Batch details: {Json}", json);
-                                var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
-                                if (records != null)
+                                Log.Error("Could not determine destination table for the failed batch. Logging all records in batch as failed.");
+                                foreach (var record in records) LogSingleRecordFailure(record, exception.ToString());
+                                return;
+                            }
+
+                            var destTableDef = TableDefinition.FromTableName(SqlConnectionManager, tableName);
+
+                            // Tái xác thực từng record trong lô
+                            foreach (var record in records)
+                            {
+                                var recordDict = (IDictionary<string, object?>)record;
+                                bool isRecordValid = true;
+                                string validationError = string.Empty;
+
+                                foreach (var col in destTableDef.Columns)
                                 {
-                                    foreach (var record in records) ProcessSingleRecord(record);
+                                    if (col.DataType == "DATETIME" && recordDict.TryGetValue(col.Name, out var value))
+                                    {
+                                        if (value != null && value is not DateTime && !DateTime.TryParse(value.ToString(), out _))
+                                        {
+                                            isRecordValid = false;
+                                            validationError = $"Invalid value '{value}' for DateTime column '{col.Name}'.";
+                                            break; // Dừng kiểm tra record này
+                                        }
+                                    }
+                                    // Thêm các quy tắc xác thực khác ở đây nếu cần (e.g., for numbers)
+                                }
+
+                                if (!isRecordValid)
+                                {
+                                    // Chỉ log những record thực sự bị lỗi
+                                    LogSingleRecordFailure(recordDict, validationError);
                                 }
                             }
-                            else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
-                            {
-                                var record = JsonSerializer.Deserialize<ExpandoObject>(json);
-                                if (record != null) ProcessSingleRecord(record);
-                            }
                         }
-                        catch (JsonException ex)
+                        else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
                         {
-                            Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", json);
-                            FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {json}");
+                            // Xử lý lỗi cho một record đơn lẻ như cũ
+                            var record = JsonSerializer.Deserialize<IDictionary<string, object?>>(json);
+                            if (record != null) LogSingleRecordFailure(record, exception.ToString());
                         }
+                    }
+                    catch (JsonException ex)
+                    {
+                        Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", error.RecordAsJson);
+                        FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {error.RecordAsJson}");
                     }
                     catch (Exception ex)
                     {
@@ -247,6 +296,65 @@ namespace MongoToSqlEtl.Jobs
                     }
                 }
             };
+        }
+
+        /// <summary>
+        /// Executes the 'sp_truncate_staging_tables' stored procedure using a Table-Valued Parameter
+        /// to clear a specific list of staging tables.
+        /// </summary>
+        protected async Task TruncateStagingTablesAsync(PerformContext? context)
+        {
+            var jobName = SourceCollectionName;
+            var tablesToTruncate = StagingTables; // Lấy danh sách từ thuộc tính trừu tượng
+
+            if (tablesToTruncate == null || tablesToTruncate.Count == 0)
+            {
+                Log.Information("[{JobName}] No specific staging tables defined to be cleared. Skipping truncation.", jobName);
+                context?.WriteLine("No staging tables specified to clear. Skipping.");
+                return;
+            }
+
+            context?.WriteLine($"Executing stored procedure to clear {tablesToTruncate.Count} specific staging table(s)...");
+            Log.Information("[{JobName}] Executing 'sp_truncate_staging_tables' for tables: {TableNames}", jobName, string.Join(", ", tablesToTruncate));
+
+            // Tạo một DataTable trong bộ nhớ để khớp với cấu trúc của UDTT
+            var tableData = new DataTable("StringList");
+            tableData.Columns.Add("Value", typeof(string));
+            foreach (var tableName in tablesToTruncate)
+            {
+                tableData.Rows.Add(tableName);
+            }
+
+            try
+            {
+                // Sử dụng ADO.NET trực tiếp để có toàn quyền kiểm soát tham số TVP
+                string connectionString = SqlConnectionManager.ConnectionString.Value;
+                using var conn = new SqlConnection(connectionString);
+                await conn.OpenAsync();
+                using var cmd = new SqlCommand("dbo.sp_TruncateStagingTables", conn)
+                {
+                    CommandType = CommandType.StoredProcedure
+                };
+
+                // Tạo tham số và gán dữ liệu DataTable
+                var tvpParam = cmd.Parameters.AddWithValue("@TableNames", tableData);
+                tvpParam.SqlDbType = SqlDbType.Structured;
+                tvpParam.TypeName = "dbo.udtt_StringList";
+
+                await cmd.ExecuteNonQueryAsync();
+
+                context?.WriteLine("Stored procedure executed successfully. Specified staging tables are cleared.");
+                Log.Information("[{JobName}] Successfully cleared specified staging tables.", jobName);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[{JobName}] A critical error occurred while executing 'sp_truncate_staging_tables' with TVP.", jobName);
+                context?.SetTextColor(ConsoleTextColor.Red);
+                context?.WriteLine($"Error: Failed to execute stored procedure to clear staging tables. The ETL process will be aborted.");
+                context?.ResetTextColor();
+
+                throw new Exception("Failed to truncate staging tables via stored procedure, aborting job execution.", ex);
+            }
         }
     }
 }

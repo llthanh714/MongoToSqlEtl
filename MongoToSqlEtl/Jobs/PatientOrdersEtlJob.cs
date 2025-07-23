@@ -25,6 +25,14 @@ namespace MongoToSqlEtl.Jobs
         private const string DestPatientDiagnosisuidsTable = "stg_patientdiagnosisuids";
         private const string DestDispenseBatchDetailTable = "stg_dispensebatchdetail";
 
+        protected override List<string> StagingTables =>
+        [
+            "stg_patientorders",
+            "stg_patientorderitems",
+            "stg_patientdiagnosisuids",
+            "stg_dispensebatchdetail"
+        ];
+
         public new async Task RunAsync(PerformContext? context)
         {
             context?.WriteLine("Starting job execution...");
@@ -165,7 +173,8 @@ namespace MongoToSqlEtl.Jobs
                     var newItem = DataTransformer.TransformObject(transformedItem, [], keepAsObjectFields, excludeKeys: [foreignKeyName]);
                     var newItemDict = (IDictionary<string, object?>)newItem;
 
-                    newItemDict.Add(foreignKeyName, parentIdAsString);
+                    // newItemDict.Add(foreignKeyName, parentIdAsString);
+                    newItemDict[foreignKeyName] = parentIdAsString;
 
                     results.Add(newItem);
                 }
