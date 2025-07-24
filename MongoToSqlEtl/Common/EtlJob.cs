@@ -17,8 +17,7 @@ namespace MongoToSqlEtl.Common
             return new DbMerge<ExpandoObject>(conn, tableName)
             {
                 MergeMode = MergeMode.InsertsOnly,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }],
-                // BatchSize = 500
+                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
             };
         }
 
@@ -27,6 +26,14 @@ namespace MongoToSqlEtl.Common
             return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns, keepAsObjectFields));
         }
 
+        /// <summary>
+        /// Transform an ExpandoObject to another ExpandoObject based on target columns.
+        /// </summary>
+        /// <param name="sourceRow"></param>
+        /// <param name="targetColumns"></param>
+        /// <param name="keepAsObjectFields"></param>
+        /// <param name="excludeKeys"></param>
+        /// <returns></returns>
         public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null, HashSet<string>? excludeKeys = null)
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
@@ -36,8 +43,9 @@ namespace MongoToSqlEtl.Common
             {
                 foreach (var columnName in targetColumns)
                 {
-                    // Thêm logic kiểm tra excludeKeys ở đây nếu cần, nhưng trường hợp chính là ở vòng lặp 'else'
-                    if (excludeKeys != null && excludeKeys.Contains(columnName)) continue;
+                    if (excludeKeys != null && excludeKeys.Contains(columnName))
+                        continue;
+                        
                     MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
                 }
             }
@@ -67,7 +75,9 @@ namespace MongoToSqlEtl.Common
             return (ExpandoObject)targetDict;
         }
 
-        // Dùng Lazy<T> để đảm bảo việc khởi tạo chỉ xảy ra một lần và thread-safe.
+        /// <summary>
+        /// Using Lazy<T> to initialize the SE Asia Time Zone only when needed.
+        /// </summary>
         private static readonly Lazy<TimeZoneInfo> SEAsiaTimeZone = new(() =>
         {
             try
@@ -137,11 +147,14 @@ namespace MongoToSqlEtl.Common
             }
         }
 
-        public static void MapProperty(
-            IDictionary<string, object?> source,
-            IDictionary<string, object?> target,
-            string key,
-            HashSet<string>? keepAsObjectFields = null)
+        /// <summary>
+        /// Mapping a property from source to target dictionary.
+        /// </summary>
+        /// <param name="source"></param>
+        /// <param name="target"></param>
+        /// <param name="key"></param>
+        /// <param name="keepAsObjectFields"></param>
+        public static void MapProperty( IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
         {
             if (target.ContainsKey(key))
             {
@@ -168,6 +181,13 @@ namespace MongoToSqlEtl.Common
             };
         }
 
+        /// <summary>
+        /// Handles the conversion of an IEnumerable to a database-friendly type.
+        /// </summary>
+        /// <param name="enumerable"></param>
+        /// <param name="key"></param>
+        /// <param name="keepAsObjectFields"></param>
+        /// <returns></returns>
         private static object HandleEnumerable(IEnumerable enumerable, string key, HashSet<string>? keepAsObjectFields)
         {
             // Kiểm tra xem enumerable có phần tử nào không
