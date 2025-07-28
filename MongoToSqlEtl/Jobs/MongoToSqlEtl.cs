@@ -8,6 +8,7 @@ using Hangfire.Server;
 using Microsoft.Data.SqlClient;
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Managers;
 using MongoToSqlEtl.Services;
 using Serilog;
@@ -204,115 +205,72 @@ namespace MongoToSqlEtl.Jobs
         /// <returns></returns>
         protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
-            return new CustomDestination<ETLBoxError>
+            return new CustomDestination<ETLBoxError>((error, rowIndex) =>
             {
-                WriteAction = (error, rowIndex) =>
+                try
                 {
-                    try
+                    var exception = error.GetException();
+                    var json = error.RecordAsJson;
+
+                    if (string.IsNullOrEmpty(json))
                     {
-                        var exception = error.GetException();
-                        var json = error.RecordAsJson;
+                        Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
+                        return;
+                    }
 
-                        if (string.IsNullOrEmpty(json))
-                        {
-                            Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
-                            return;
-                        }
+                    // Lấy thông điệp lỗi gốc để ghi log
+                    var reason = exception.ToString();
 
-                        // Hàm nội tuyến để xử lý ghi log cho một record
-                        void LogSingleRecordFailure(IDictionary<string, object?> recordDict, string reason)
-                        {
-                            if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
-                            {
-                                string? recordId = idValue.ToString();
-                                context?.WriteLine($"Data Row Error. ID: {recordId}. Reason: {reason}");
-
-                                if (!string.IsNullOrEmpty(recordId))
-                                {
-                                    Log.Warning("Data Row Error. ID: {RecordId}. Reason: {Reason}", recordId, reason);
-                                    FailedRecordManager.LogFailedRecord(recordId, reason);
-                                    CurrentRunFailedIds.Add(recordId);
-                                }
-                                else
-                                {
-                                    Log.Warning("Data Row Error. No valid ID found in the record. Reason: {Reason}", reason);
-                                }
-                            }
-                            else
-                            {
-                                Log.Warning("Could not find a valid ID in the error record to log. Data: {@ErrorRecord}", recordDict);
-                            }
-                        }
-
-                        using var jsonDoc = JsonDocument.Parse(json);
+                    // Chuyển đổi JSON lỗi thành một danh sách các đối tượng.
+                    // Dù là lỗi một bản ghi hay một lô, chúng ta đều xử lý như một danh sách.
+                    var records = new List<IDictionary<string, object?>>();
+                    using (var jsonDoc = JsonDocument.Parse(json))
+                    {
                         if (jsonDoc.RootElement.ValueKind == JsonValueKind.Array)
                         {
-                            // === LOGIC MỚI: XỬ LÝ LỖI THEO LÔ THÔNG MINH HƠN ===
-                            Log.Warning(exception, "A data batch failed to write to SQL Server. Initiating re-validation to find specific culprits...");
-                            var records = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
-                            if (records == null || records.Count == 0) return;
-
-                            // Chỉ lấy TableDefinition một lần cho cả lô (giả định lô thuộc 1 bảng)
-                            // Đây là một giả định hợp lý cho hầu hết các luồng ETL
-                            var firstRecord = records.First() as IDictionary<string, object?>;
-                            string? tableName = firstRecord?.FirstOrDefault(kvp => kvp.Key.StartsWith("stg_")).Key;
-
-                            // Nếu không xác định được bảng, ghi log chung cho tất cả
-                            if (tableName == null)
-                            {
-                                Log.Error("Could not determine destination table for the failed batch. Logging all records in batch as failed.");
-                                foreach (var record in records) LogSingleRecordFailure(record, exception.ToString());
-                                return;
-                            }
-
-                            var destTableDef = TableDefinition.FromTableName(SqlConnectionManager, tableName);
-
-                            // Tái xác thực từng record trong lô
-                            foreach (var record in records)
-                            {
-                                var recordDict = (IDictionary<string, object?>)record;
-                                bool isRecordValid = true;
-                                string validationError = string.Empty;
-
-                                foreach (var col in destTableDef.Columns)
-                                {
-                                    if (col.DataType == "DATETIME" && recordDict.TryGetValue(col.Name, out var value))
-                                    {
-                                        if (value != null && value is not DateTime && !DateTime.TryParse(value.ToString(), out _))
-                                        {
-                                            isRecordValid = false;
-                                            validationError = $"Invalid value '{value}' for DateTime column '{col.Name}'.";
-                                            break; // Dừng kiểm tra record này
-                                        }
-                                    }
-                                    // Thêm các quy tắc xác thực khác ở đây nếu cần (e.g., for numbers)
-                                }
-
-                                if (!isRecordValid)
-                                {
-                                    // Chỉ log những record thực sự bị lỗi
-                                    LogSingleRecordFailure(recordDict, validationError);
-                                }
-                            }
+                            var recordList = JsonSerializer.Deserialize<List<ExpandoObject>>(json);
+                            if (recordList != null) records.AddRange(recordList);
                         }
                         else if (jsonDoc.RootElement.ValueKind == JsonValueKind.Object)
                         {
-                            // Xử lý lỗi cho một record đơn lẻ như cũ
-                            var record = JsonSerializer.Deserialize<IDictionary<string, object?>>(json);
-                            if (record != null) LogSingleRecordFailure(record, exception.ToString());
+                            var singleRecord = JsonSerializer.Deserialize<ExpandoObject>(json);
+                            if (singleRecord != null) records.Add(singleRecord);
                         }
                     }
-                    catch (JsonException ex)
+
+                    // Ghi log lỗi cho TẤT CẢ các bản ghi trong dữ liệu bị lỗi.
+                    // Lần chạy ETL tiếp theo sẽ tự động xử lý lại các ID này.
+                    foreach (var recordDict in records)
                     {
-                        Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", error.RecordAsJson);
-                        FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {error.RecordAsJson}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Fatal(ex, "A critical, unhandled exception occurred within the error logging action itself.");
+                        if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
+                        {
+                            string recordId = idValue.ToString()!;
+                            if (!string.IsNullOrEmpty(recordId))
+                            {
+                                context?.WriteLine($"Data Row Error. ID: {recordId}. Reason: Batch write failed.");
+                                // Log.Warning("Logging failed record ID: {RecordId} due to batch error.", recordId);
+
+                                // Sử dụng FailedRecordManager để ghi nhận ID lỗi
+                                FailedRecordManager.LogFailedRecord(recordId, reason);
+                                CurrentRunFailedIds.Add(recordId);
+                            }
+                        }
+                        else
+                        {
+                            Log.Warning("Could not find a valid '_id' in the error record to log. Data: {@ErrorRecord}", recordDict);
+                        }
                     }
                 }
-            };
+                catch (JsonException ex)
+                {
+                    Log.Error(ex, "Could not parse error data from JSON. Raw JSON: {Json}", error.RecordAsJson);
+                    FailedRecordManager.LogFailedRecord("INVALID_JSON_RECORD", $"JsonParseException: {ex.Message}. RawData: {error.RecordAsJson}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Fatal(ex, "A critical, unhandled exception occurred within the error logging action itself.");
+                }
+            });
         }
 
         /// <summary>
@@ -373,5 +331,100 @@ namespace MongoToSqlEtl.Jobs
                 throw new Exception("Failed to truncate staging tables via stored procedure, aborting job execution.", ex);
             }
         }
+
+        #region Transformation Logic Specific to PatientOrders
+
+        /// <summary>
+        /// Component CHỈ CÓ CHỨC NĂNG làm phẳng (flatten) một mảng con.
+        /// Nó sẽ giữ lại TẤT CẢ các trường của các phần tử con.
+        /// </summary>
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(
+            string arrayFieldName,
+            string foreignKeyName,
+            string parentIdFieldName = "_id")
+        {
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
+            {
+                var results = new List<ExpandoObject>();
+                var parentAsDict = (IDictionary<string, object?>)parentRow;
+
+                if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
+                {
+                    return results;
+                }
+                var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+
+                if (parentAsDict.TryGetValue(arrayFieldName, out object? value) && value is IEnumerable<object> items)
+                {
+                    foreach (var sourceItem in items)
+                    {
+                        if (sourceItem == null) continue;
+
+                        // Chuyển đổi item thành ExpandoObject nếu cần
+                        var itemAsExpando = (sourceItem is ExpandoObject expando)
+                            ? expando
+                            : ConvertToExando(sourceItem);
+
+                        if (itemAsExpando == null) continue;
+
+                        var finalItemDict = (IDictionary<string, object?>)itemAsExpando;
+
+                        // Giữ lại tất cả các trường và chỉ thêm khóa ngoại
+                        finalItemDict[foreignKeyName] = parentIdAsString;
+
+                        results.Add((ExpandoObject)finalItemDict);
+                    }
+                }
+                return results;
+            });
+        }
+
+        /// <summary>
+        /// Component CHỈ CÓ CHỨC NĂNG biến đổi và ánh xạ các trường của một đối tượng
+        /// với các cột của bảng đích.
+        /// </summary>
+        protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(
+            ICollection<string> targetColumns,
+            HashSet<string>? keepAsObjectFields = null)
+        {
+            // Chúng ta chỉ cần gọi lại logic đã có trong DataTransformer
+            return new RowTransformation<ExpandoObject>(row =>
+                DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields)
+            );
+        }
+
+        /// <summary>
+        /// Convert một đối tượng thành ExpandoObject.
+        /// </summary>
+        /// <param name="obj"></param>
+        /// <returns></returns>
+        protected static ExpandoObject? ConvertToExando(object obj)
+        {
+            try
+            {
+                // BsonDocument có phương thức .ToJson() để chuyển đổi hiệu quả.
+                if (obj is BsonDocument bsonDoc)
+                {
+                    // Chuyển BsonDocument thành chuỗi JSON, sau đó deserialize thành ExpandoObject.
+                    // Sử dụng các tùy chọn để đảm bảo định dạng JSON chuẩn, dễ đọc bởi System.Text.Json.
+                    var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
+                    var expando = JsonSerializer.Deserialize<ExpandoObject>(json);
+                    return expando;
+                }
+
+                // Đối với các loại object khác (ví dụ: các kiểu anonymous), serialize trực tiếp.
+                var generalJson = JsonSerializer.Serialize(obj);
+                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
+                return generalExpando;
+            }
+            catch (Exception ex)
+            {
+                // Ghi lại log nếu có lỗi xảy ra trong quá trình chuyển đổi.
+                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}", obj?.GetType().FullName ?? "null");
+                return null;
+            }
+        }
+
+        #endregion
     }
 }

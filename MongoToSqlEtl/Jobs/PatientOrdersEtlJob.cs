@@ -3,13 +3,9 @@ using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
 using Hangfire.Console;
 using Hangfire.Server;
-using MongoDB.Bson;
 using MongoDB.Driver;
-using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Services;
-using Serilog;
 using System.Dynamic;
-using System.Text.Json;
 
 namespace MongoToSqlEtl.Jobs
 {
@@ -23,12 +19,14 @@ namespace MongoToSqlEtl.Jobs
         private const string DestPatientOrdersTable = "stg_patientorders";
         private const string DestPatientOrderItemsTable = "stg_patientorderitems";
         private const string DestPatientDiagnosisuidsTable = "stg_patientdiagnosisuids";
+        private const string DestDispenseBatchDetailTable = "stg_dispensebatchdetail";
 
         protected override List<string> StagingTables =>
         [
             "stg_patientorders",
             "stg_patientorderitems",
-            "stg_patientdiagnosisuids"
+            "stg_patientdiagnosisuids",
+            "stg_dispensebatchdetail"
         ];
 
         public new async Task RunAsync(PerformContext? context)
@@ -40,163 +38,92 @@ namespace MongoToSqlEtl.Jobs
 
         protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context)
         {
+            // 1. Định nghĩa các bảng (Không đổi)
             var patientordersDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrdersTable);
             var patientorderitemsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientOrderItemsTable);
             var patientdiagnosisuidsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientDiagnosisuidsTable);
+            var dispensebatchdetailDef = TableDefinition.FromTableName(SqlConnectionManager, DestDispenseBatchDetailTable);
 
+            // 2. Các component nguồn và lỗi (Không đổi)
             var source = CreateMongoDbSource(startDate, endDate, failedIds);
             var logErrors = CreateErrorLoggingDestination(context);
 
-            var transformPatientOrders = DataTransformer.CreateTransformComponent(
-                [.. patientordersDef.Columns.Select(c => c.Name)]);
-
-            var flattenAndTransformOrderItems = CreateFlattenAndTransformComponent(
-                [.. patientorderitemsDef.Columns.Select(c => c.Name)],
-                null,
-                "patientorderitems",
-                "patientordersuid"
-            );
-
-            var flattenAndTransformDiagnosisUids = CreateFlattenAndTransformComponent(
-                [.. patientdiagnosisuidsDef.Columns.Select(c => c.Name)],
-                null,
-                "patientdiagnosisuids",
-                "patientordersuid"
-            );
-
-            var destPatientOrders = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientOrdersTable };
-            var destPatientOrderItems = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientOrderItemsTable };
-            var destPatientDiagnosisUids = new DbDestination<ExpandoObject>() { ConnectionManager = SqlConnectionManager, TableName = DestPatientDiagnosisuidsTable };
-
+            // 3. Multicast cấp 1 (Không đổi)
             var multicastOrders = new Multicast<ExpandoObject>();
-
             source.LinkTo(multicastOrders);
             source.LinkErrorTo(logErrors);
 
-            // Flow 1: patientorders
-            multicastOrders.LinkTo(transformPatientOrders);
-            transformPatientOrders.LinkTo(destPatientOrders);
-            transformPatientOrders.LinkErrorTo(logErrors);
+            // ================== FLOW 1: stg_patientorders (Chỉ dùng Transform & Map) ==================
+            var transformAndMapOrders = CreateTransformAndMapComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
+            var destPatientOrders = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientOrdersTable);
+
+            multicastOrders.LinkTo(transformAndMapOrders);
+            transformAndMapOrders.LinkTo(destPatientOrders);
+            transformAndMapOrders.LinkErrorTo(logErrors);
             destPatientOrders.LinkErrorTo(logErrors);
 
-            // Flow 2: patientorderitems
-            multicastOrders.LinkTo(flattenAndTransformOrderItems,
-                o => ((IDictionary<string, object?>)o).ContainsKey("patientorderitems"));
-            flattenAndTransformOrderItems.LinkTo(destPatientOrderItems);
-            flattenAndTransformOrderItems.LinkErrorTo(logErrors);
-            destPatientOrderItems.LinkErrorTo(logErrors);
+            // ================== FLOW 2: patientorderitems và các con ==================
+            // Bước 2.1: Chỉ làm phẳng `patientorderitems`
+            var flattenOrderItems = CreateFlattenComponent("patientorderitems", "patientordersuid");
+            multicastOrders.LinkTo(flattenOrderItems, o => ((IDictionary<string, object?>)o).ContainsKey("patientorderitems"));
+            flattenOrderItems.LinkErrorTo(logErrors);
 
-            // Flow 3: patientdiagnosisuids
-            multicastOrders.LinkTo(flattenAndTransformDiagnosisUids,
-                o => ((IDictionary<string, object?>)o).ContainsKey("patientdiagnosisuids"));
-            flattenAndTransformDiagnosisUids.LinkTo(destPatientDiagnosisUids);
-            flattenAndTransformDiagnosisUids.LinkErrorTo(logErrors);
+            // Bước 2.2: Multicast cấp 2 cho các item đã được làm phẳng
+            var multicastItems = new Multicast<ExpandoObject>();
+            flattenOrderItems.LinkTo(multicastItems);
+
+            // -- Nhánh 2.3: Ghi vào `stg_patientorderitems` --
+            var transformAndMapItems = CreateTransformAndMapComponent(
+                [.. patientorderitemsDef.Columns.Select(c => c.Name)],
+                // Yêu cầu giữ lại `dispensebatchdetail` để nhánh dưới có thể xử lý
+                ["dispensebatchdetail"]
+            );
+            var destPatientOrderItems = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientOrderItemsTable);
+
+            multicastItems.LinkTo(transformAndMapItems);
+            transformAndMapItems.LinkTo(destPatientOrderItems);
+            destPatientOrderItems.LinkErrorTo(logErrors); // Lỗi sau khi transform sẽ được bắt ở đây
+
+            // -- Nhánh 2.4: Ghi vào `stg_dispensebatchdetail` --
+            // Bước 2.4.1: Làm phẳng cấp 2
+            var flattenDispenseBatch = CreateFlattenComponent(
+                "dispensebatchdetail",
+                "patientorderitemsuid",
+                "orderitemuid" // Giả định khóa của patientorderitem là 'orderitemuid'
+            );
+            multicastItems.LinkTo(flattenDispenseBatch, item => ((IDictionary<string, object?>)item).ContainsKey("dispensebatchdetail"));
+            flattenDispenseBatch.LinkErrorTo(logErrors);
+
+            // Bước 2.4.2: Transform và Map cho dispensebatchdetail
+            var transformAndMapDispenseBatch = CreateTransformAndMapComponent(
+                [.. dispensebatchdetailDef.Columns.Select(c => c.Name)]
+            );
+            var destDispenseBatchDetail = new DbDestination<ExpandoObject>(SqlConnectionManager, "stg_dispensebatchdetail");
+
+            flattenDispenseBatch.LinkTo(transformAndMapDispenseBatch);
+            transformAndMapDispenseBatch.LinkTo(destDispenseBatchDetail);
+            destDispenseBatchDetail.LinkErrorTo(logErrors);
+
+
+            // ================== FLOW 3: stg_patientdiagnosisuids ==================
+            var flattenDiagnosisUids = CreateFlattenComponent("patientdiagnosisuids", "patientordersuid");
+            multicastOrders.LinkTo(flattenDiagnosisUids, o => ((IDictionary<string, object?>)o).ContainsKey("patientdiagnosisuids"));
+            flattenDiagnosisUids.LinkErrorTo(logErrors);
+
+            var transformAndMapDiagnosis = CreateTransformAndMapComponent([.. patientdiagnosisuidsDef.Columns.Select(c => c.Name)]);
+            var destPatientDiagnosisUids = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientDiagnosisuidsTable);
+
+            flattenDiagnosisUids.LinkTo(transformAndMapDiagnosis);
+            transformAndMapDiagnosis.LinkTo(destPatientDiagnosisUids);
             destPatientDiagnosisUids.LinkErrorTo(logErrors);
 
+            // 4. Trả về pipeline (Không đổi)
             return new EtlPipeline(
                 Source: source,
-                Destinations: [destPatientOrders, destPatientOrderItems, destPatientDiagnosisUids],
+                Destinations: [destPatientOrders, destPatientOrderItems, destPatientDiagnosisUids, destDispenseBatchDetail],
                 ErrorDestination: logErrors,
                 SqlStoredProcedureName: "sp_MergePatientOrdersData"
             );
         }
-
-        #region Transformation Logic Specific to PatientOrders
-
-        /// <summary>
-        /// Create a transformation component that flattens and transforms the data from the source collection.
-        /// </summary>
-        /// <param name="targetColumns"></param>
-        /// <param name="keepAsObjectFields"></param>
-        /// <param name="arrayFieldName"></param>
-        /// <param name="foreignKeyName"></param>
-        /// <returns></returns>
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields, string arrayFieldName, string foreignKeyName)
-        {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
-            {
-                var results = new List<ExpandoObject>();
-                var parentAsDict = (IDictionary<string, object?>)parentRow;
-
-                // Lấy foreign key từ bản ghi cha
-                if (!parentAsDict.TryGetValue("_id", out var parentIdValue))
-                {
-                    return results; // Bỏ qua nếu không có ID cha
-                }
-                var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-
-                // Kiểm tra và xử lý mảng
-                if (parentAsDict.TryGetValue(arrayFieldName, out object? value) && value is IEnumerable<object> items)
-                {
-                    foreach (object? sourceItem in items)
-                    {
-                        if (sourceItem == null) continue;
-
-                        var itemAsExpando = (sourceItem is ExpandoObject expando)
-                            ? expando
-                            : ConvertToExando(sourceItem);
-
-                        if (itemAsExpando == null) continue;
-
-                        // --- LOGIC TỐI ƯU HÓA BẮT ĐẦU TỪ ĐÂY ---
-                        // Thay vì gọi DataTransformer.TransformObject, chúng ta thực hiện logic biến đổi tại chỗ.
-                        var sourceItemDict = (IDictionary<string, object?>)itemAsExpando;
-                        var finalItemDict = (IDictionary<string, object?>)new ExpandoObject();
-
-                        // 1. Map các thuộc tính dựa trên các cột mục tiêu (targetColumns)
-                        foreach (var columnName in targetColumns)
-                        {
-                            // Bỏ qua foreign key vì nó sẽ được thêm ở bước sau
-                            if (columnName.Equals(foreignKeyName, StringComparison.OrdinalIgnoreCase))
-                                continue;
-
-                            // "Inline" logic từ DataTransformer.MapProperty
-                            DataTransformer.MapProperty(sourceItemDict, finalItemDict, columnName, keepAsObjectFields);
-                        }
-
-                        // 2. Thêm foreign key vào đối tượng cuối cùng
-                        finalItemDict[foreignKeyName] = parentIdAsString;
-
-                        results.Add((ExpandoObject)finalItemDict);
-                        // --- LOGIC TỐI ƯU HÓA KẾT THÚC ---
-                    }
-                }
-                return results;
-            });
-        }
-
-        /// <summary>
-        /// Convert một đối tượng thành ExpandoObject.
-        /// </summary>
-        /// <param name="obj"></param>
-        /// <returns></returns>
-        private static ExpandoObject? ConvertToExando(object obj)
-        {
-            try
-            {
-                // BsonDocument có phương thức .ToJson() để chuyển đổi hiệu quả.
-                if (obj is BsonDocument bsonDoc)
-                {
-                    // Chuyển BsonDocument thành chuỗi JSON, sau đó deserialize thành ExpandoObject.
-                    // Sử dụng các tùy chọn để đảm bảo định dạng JSON chuẩn, dễ đọc bởi System.Text.Json.
-                    var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
-                    var expando = JsonSerializer.Deserialize<ExpandoObject>(json);
-                    return expando;
-                }
-
-                // Đối với các loại object khác (ví dụ: các kiểu anonymous), serialize trực tiếp.
-                var generalJson = JsonSerializer.Serialize(obj);
-                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
-                return generalExpando;
-            }
-            catch (Exception ex)
-            {
-                // Ghi lại log nếu có lỗi xảy ra trong quá trình chuyển đổi.
-                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}", obj?.GetType().FullName ?? "null");
-                return null;
-            }
-        }
-
-        #endregion
     }
 }

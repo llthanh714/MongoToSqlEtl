@@ -42,7 +42,7 @@ namespace MongoToSqlEtl.Common
                 {
                     if (excludeKeys != null && excludeKeys.Contains(columnName))
                         continue;
-                        
+
                     MapProperty(sourceAsDict, targetDict, columnName, keepAsObjectFields);
                 }
             }
@@ -151,7 +151,7 @@ namespace MongoToSqlEtl.Common
         /// <param name="target"></param>
         /// <param name="key"></param>
         /// <param name="keepAsObjectFields"></param>
-        public static void MapProperty( IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
+        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
         {
             if (target.ContainsKey(key))
             {

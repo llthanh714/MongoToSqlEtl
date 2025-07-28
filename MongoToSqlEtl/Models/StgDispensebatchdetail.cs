@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-
-namespace MongoToSqlEtl.Models;
+﻿namespace MongoToSqlEtl.Models;
 
 public partial class StgDispensebatchdetail
 {
