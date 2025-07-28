@@ -339,44 +339,61 @@ namespace MongoToSqlEtl.Jobs
         /// Nó sẽ giữ lại TẤT CẢ các trường của các phần tử con.
         /// </summary>
         protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(
-            string arrayFieldName,
-            string foreignKeyName,
-            string parentIdFieldName = "_id")
+    string arrayFieldName,
+    string foreignKeyName,
+    string parentIdFieldName = "_id")
         {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
+            // Hàm được truyền vào RowMultiplication bây giờ là một hàm iterator.
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(
+                parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName)
+            );
+        }
+
+        /// <summary>
+        /// Một iterator sử dụng 'yield return' để làm phẳng (flatten) một mảng con
+        /// một cách hiệu quả về bộ nhớ.
+        /// </summary>
+        private static IEnumerable<ExpandoObject> Flatten(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, string parentIdFieldName)
+        {
+            var parentAsDict = (IDictionary<string, object?>)parentRow;
+
+            // BƯỚC 1: "Chụp" ID của cha vào một biến cục bộ ngay lập tức.
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
             {
-                var results = new List<ExpandoObject>();
-                var parentAsDict = (IDictionary<string, object?>)parentRow;
+                yield break;
+            }
+            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
 
-                if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
-                {
-                    return results;
-                }
-                var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+            // BƯỚC 2: Kiểm tra xem mảng con có tồn tại không.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value is not IEnumerable<object> items)
+            {
+                yield break;
+            }
 
-                if (parentAsDict.TryGetValue(arrayFieldName, out object? value) && value is IEnumerable<object> items)
-                {
-                    foreach (var sourceItem in items)
-                    {
-                        if (sourceItem == null) continue;
+            // ✨ ĐIỂM THAY ĐỔI QUAN TRỌNG NHẤT:
+            // Tạo một bản sao của danh sách item con. Thao tác .ToList() sẽ sao chép
+            // tất cả các item vào một List mới, nằm trong một vùng nhớ an toàn,
+            // độc lập với đối tượng 'parentRow' gốc. Điều này ngăn chặn lỗi AccessViolationException.
+            var safeItemList = items.ToList();
 
-                        // Chuyển đổi item thành ExpandoObject nếu cần
-                        var itemAsExpando = (sourceItem is ExpandoObject expando)
-                            ? expando
-                            : ConvertToExando(sourceItem);
+            // BƯỚC 3: Bây giờ, lặp qua danh sách an toàn này.
+            foreach (var sourceItem in safeItemList)
+            {
+                if (sourceItem == null) continue;
 
-                        if (itemAsExpando == null) continue;
+                var itemAsExpando = (sourceItem is ExpandoObject expando)
+                    ? expando
+                    : ConvertToExando(sourceItem);
 
-                        var finalItemDict = (IDictionary<string, object?>)itemAsExpando;
+                if (itemAsExpando == null) continue;
 
-                        // Giữ lại tất cả các trường và chỉ thêm khóa ngoại
-                        finalItemDict[foreignKeyName] = parentIdAsString;
+                var finalItemDict = (IDictionary<string, object?>)itemAsExpando;
 
-                        results.Add((ExpandoObject)finalItemDict);
-                    }
-                }
-                return results;
-            });
+                // Thao tác ghi này bây giờ hoàn toàn an toàn.
+                finalItemDict[foreignKeyName] = parentIdAsString;
+
+                yield return (ExpandoObject)finalItemDict;
+            }
         }
 
         /// <summary>
