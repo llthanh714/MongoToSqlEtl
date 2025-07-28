@@ -7,9 +7,6 @@ using System.Text.Json;
 
 namespace MongoToSqlEtl.Common
 {
-    /// <summary>
-    /// Lớp tiện ích chứa các phương thức biến đổi dữ liệu dùng chung.
-    /// </summary>
     public static class DataTransformer
     {
         public static DbMerge<ExpandoObject> CreateDbMergeDestination(IConnectionManager conn, string tableName)

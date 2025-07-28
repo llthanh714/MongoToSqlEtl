@@ -104,11 +104,14 @@ namespace MongoToSqlEtl.Jobs
         #region Transformation Logic Specific to PatientOrders
 
         /// <summary>
-        /// Hợp nhất logic tách mảng (flatten) và biến đổi (transform) cho một mảng từ bản ghi cha,
-        /// và cho mỗi item trong mảng, nó sẽ tạo ra một ExpandoObject mới
-        /// chỉ chứa các cột cần thiết cho bảng đích.
+        /// Create a transformation component that flattens and transforms the data from the source collection.
         /// </summary>
-        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent( ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields, string arrayFieldName, string foreignKeyName)
+        /// <param name="targetColumns"></param>
+        /// <param name="keepAsObjectFields"></param>
+        /// <param name="arrayFieldName"></param>
+        /// <param name="foreignKeyName"></param>
+        /// <returns></returns>
+        private static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields, string arrayFieldName, string foreignKeyName)
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow =>
             {
@@ -135,20 +138,27 @@ namespace MongoToSqlEtl.Jobs
 
                         if (itemAsExpando == null) continue;
 
-                        // Gọi TransformObject MỘT LẦN DUY NHẤT với danh sách cột đích.
-                        var finalItem = DataTransformer.TransformObject(
-                            itemAsExpando,
-                            targetColumns,
-                            keepAsObjectFields,
-                            excludeKeys: [foreignKeyName] // Loại bỏ foreign key cũ nếu có
-                        );
+                        // --- LOGIC TỐI ƯU HÓA BẮT ĐẦU TỪ ĐÂY ---
+                        // Thay vì gọi DataTransformer.TransformObject, chúng ta thực hiện logic biến đổi tại chỗ.
+                        var sourceItemDict = (IDictionary<string, object?>)itemAsExpando;
+                        var finalItemDict = (IDictionary<string, object?>)new ExpandoObject();
 
-                        var finalItemDict = (IDictionary<string, object?>)finalItem;
+                        // 1. Map các thuộc tính dựa trên các cột mục tiêu (targetColumns)
+                        foreach (var columnName in targetColumns)
+                        {
+                            // Bỏ qua foreign key vì nó sẽ được thêm ở bước sau
+                            if (columnName.Equals(foreignKeyName, StringComparison.OrdinalIgnoreCase))
+                                continue;
 
-                        // Thêm foreign key vào đối tượng cuối cùng
+                            // "Inline" logic từ DataTransformer.MapProperty
+                            DataTransformer.MapProperty(sourceItemDict, finalItemDict, columnName, keepAsObjectFields);
+                        }
+
+                        // 2. Thêm foreign key vào đối tượng cuối cùng
                         finalItemDict[foreignKeyName] = parentIdAsString;
 
-                        results.Add(finalItem);
+                        results.Add((ExpandoObject)finalItemDict);
+                        // --- LOGIC TỐI ƯU HÓA KẾT THÚC ---
                     }
                 }
                 return results;

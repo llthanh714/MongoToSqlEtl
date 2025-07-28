@@ -26,8 +26,6 @@ namespace MongoToSqlEtl.Jobs
         protected readonly EtlLogManager LogManager;
         protected readonly EtlFailedRecordManager FailedRecordManager;
 
-        // ROBUSTNESS FIX: Use ConcurrentBag for thread-safe collection of failed IDs.
-        // This avoids potential race conditions when the error destination is called from multiple threads.
         protected ConcurrentBag<string> CurrentRunFailedIds { get; private set; } = [];
         protected abstract List<string> StagingTables { get; }
         protected abstract string SourceCollectionName { get; }
@@ -43,6 +41,14 @@ namespace MongoToSqlEtl.Jobs
             FailedRecordManager = new EtlFailedRecordManager(sqlConnectionManager, SourceCollectionName);
         }
 
+        /// <summary>
+        /// Builds the ETL pipeline for the job.
+        /// </summary>
+        /// <param name="startDate"></param>
+        /// <param name="endDate"></param>
+        /// <param name="failedIds"></param>
+        /// <param name="context"></param>
+        /// <returns></returns>
         protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context);
 
         /// <summary>
@@ -87,12 +93,7 @@ namespace MongoToSqlEtl.Jobs
 
                 await Network.ExecuteAsync(pipeline.Source);
 
-                // Đợi cho đến khi TẤT CẢ các thành phần trong pipeline hoàn thành.
-                // await Task.WhenAll(pipeline.Source.Completion,
-                //                   pipeline.ErrorDestination.Completion,
-                //                   Task.WhenAll(pipeline.Destinations.Select(d => d.Completion)));
-
-                // Ensure that the error destination is always created, even if no errors are expected.
+                // Check if the source has been executed by stored procedure
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
                     var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}")
@@ -142,6 +143,13 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
+        /// <summary>
+        /// Creates a MongoDB source for the ETL pipeline.
+        /// </summary>
+        /// <param name="startDate"></param>
+        /// <param name="endDate"></param>
+        /// <param name="failedIds"></param>
+        /// <returns></returns>
         protected virtual MongoDbSource<ExpandoObject> CreateMongoDbSource(DateTime startDate, DateTime endDate, List<string> failedIds)
         {
             var watermarkFilter = Builders<BsonDocument>.Filter.And(
@@ -189,6 +197,11 @@ namespace MongoToSqlEtl.Jobs
             };
         }
 
+        /// <summary>
+        /// Creates a custom destination for logging errors that occur during the ETL process.
+        /// </summary>
+        /// <param name="context"></param>
+        /// <returns></returns>
         protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
             return new CustomDestination<ETLBoxError>
