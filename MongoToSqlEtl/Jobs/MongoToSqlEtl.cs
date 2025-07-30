@@ -443,6 +443,86 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
+        /// <summary>
+        /// Component gộp: Vừa làm phẳng (flatten) một mảng con, vừa biến đổi (transform)
+        /// và ánh xạ (map) các trường của kết quả theo các cột của bảng đích.
+        /// Đây là sự kết hợp của CreateFlattenComponent và CreateTransformAndMapComponent.
+        /// </summary>
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(
+            string arrayFieldName,
+            string foreignKeyName,
+            ICollection<string> targetColumns,
+            string parentIdFieldName = "_id",
+            HashSet<string>? keepAsObjectFields = null)
+        {
+            // Hàm được truyền vào RowMultiplication là một hàm iterator (sử dụng yield return)
+            // để xử lý hiệu quả về bộ nhớ, tạo ra nhiều bản ghi con từ một bản ghi cha.
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(
+                parentRow => FlattenAndTransform(
+                    parentRow,
+                    arrayFieldName,
+                    foreignKeyName,
+                    targetColumns,
+                    parentIdFieldName,
+                    keepAsObjectFields
+                )
+            );
+        }
+
+        /// <summary>
+        /// Iterator thực hiện logic làm phẳng và biến đổi.
+        /// </summary>
+        private static IEnumerable<ExpandoObject> FlattenAndTransform(
+            ExpandoObject parentRow,
+            string arrayFieldName,
+            string foreignKeyName,
+            ICollection<string> targetColumns,
+            string parentIdFieldName,
+            HashSet<string>? keepAsObjectFields)
+        {
+            var parentAsDict = (IDictionary<string, object?>)parentRow;
+
+            // Lấy ID của đối tượng cha để gán làm khóa ngoại cho các đối tượng con.
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
+            {
+                // Nếu không có ID cha, không thể tạo liên kết, bỏ qua.
+                yield break;
+            }
+            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+
+            // Tìm và kiểm tra xem trường cần làm phẳng có phải là một danh sách hay không.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value is not IEnumerable<object> items)
+            {
+                // Nếu không phải danh sách, không có gì để làm phẳng.
+                yield break;
+            }
+
+            // Lặp qua từng phần tử trong mảng con.
+            foreach (var sourceItem in items)
+            {
+                if (sourceItem == null) continue;
+
+                // Chuyển đổi phần tử con thành ExpandoObject nếu cần.
+                var itemAsExpando = (sourceItem is ExpandoObject expando)
+                    ? expando
+                    : ConvertToExando(sourceItem);
+
+                if (itemAsExpando == null) continue;
+
+                var itemAsDict = (IDictionary<string, object?>)itemAsExpando;
+
+                // Thêm khóa ngoại (ID của cha) vào đối tượng con.
+                itemAsDict[foreignKeyName] = parentIdAsString;
+
+                // Thực hiện biến đổi và ánh xạ đối tượng con đã có khóa ngoại
+                // để khớp với cấu trúc của bảng đích trong SQL.
+                var transformedItem = DataTransformer.TransformObject(itemAsExpando, targetColumns, keepAsObjectFields);
+
+                // Trả về đối tượng đã được biến đổi hoàn chỉnh.
+                yield return transformedItem;
+            }
+        }
+
         #endregion
     }
 }
