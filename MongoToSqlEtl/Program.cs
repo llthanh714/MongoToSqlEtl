@@ -94,7 +94,7 @@ try
             JobExpirationCheckInterval = TimeSpan.FromDays(15),
             CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
             SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
-            QueuePollInterval = TimeSpan.FromSeconds(30),
+            QueuePollInterval = TimeSpan.FromSeconds(5),
             UseRecommendedIsolationLevel = true,
             DisableGlobalLocks = true // Recommended for performance
         })
