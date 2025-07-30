@@ -5,7 +5,7 @@ using System.Collections;
 using System.Dynamic;
 using System.Text.Json;
 
-namespace MongoToSqlEtl.Common
+namespace MongoToSqlEtl.Jobs.Common
 {
     public static class DataTransformer
     {

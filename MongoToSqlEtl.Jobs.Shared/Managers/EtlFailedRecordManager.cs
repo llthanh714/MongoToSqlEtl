@@ -4,7 +4,7 @@ using Microsoft.Data.SqlClient;
 using Serilog;
 using System.Data;
 
-namespace MongoToSqlEtl.Managers
+namespace MongoToSqlEtl.Jobs.Managers
 {
     public class EtlFailedRecordManager(IConnectionManager connectionManager, string sourceCollectionName)
     {

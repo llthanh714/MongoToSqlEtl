@@ -1,4 +1,4 @@
-﻿namespace MongoToSqlEtl.Services
+﻿namespace MongoToSqlEtl.Jobs.Services
 {
     /// <summary>
     /// Defines the contract for a notification service.

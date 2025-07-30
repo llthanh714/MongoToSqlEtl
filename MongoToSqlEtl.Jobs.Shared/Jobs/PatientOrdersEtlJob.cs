@@ -4,10 +4,10 @@ using ETLBox.DataFlow;
 using Hangfire.Console;
 using Hangfire.Server;
 using MongoDB.Driver;
-using MongoToSqlEtl.Services;
+using MongoToSqlEtl.Jobs.Services;
 using System.Dynamic;
 
-namespace MongoToSqlEtl.Jobs
+namespace MongoToSqlEtl.Jobs.Jobs
 {
     /// <summary>
     /// Lớp triển khai cụ thể cho việc ETL collection 'patientorders'.

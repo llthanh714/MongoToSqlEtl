@@ -8,16 +8,16 @@ using Hangfire.Server;
 using Microsoft.Data.SqlClient;
 using MongoDB.Bson;
 using MongoDB.Driver;
-using MongoToSqlEtl.Common;
-using MongoToSqlEtl.Managers;
-using MongoToSqlEtl.Services;
+using MongoToSqlEtl.Jobs.Common;
+using MongoToSqlEtl.Jobs.Managers;
+using MongoToSqlEtl.Jobs.Services;
 using Serilog;
 using System.Collections.Concurrent;
 using System.Data;
 using System.Dynamic;
 using System.Text.Json;
 
-namespace MongoToSqlEtl.Jobs
+namespace MongoToSqlEtl.Jobs.Jobs
 {
     public abstract class EtlJob
     {
@@ -374,7 +374,7 @@ namespace MongoToSqlEtl.Jobs
                 if (sourceItem == null) continue;
 
                 // Tạo bản sao độc lập của item con để đảm bảo an toàn luồng
-                var itemAsExpando = (sourceItem is ExpandoObject expando)
+                var itemAsExpando = sourceItem is ExpandoObject expando
                     ? expando
                     : ConvertToExando(sourceItem);
 
@@ -503,7 +503,7 @@ namespace MongoToSqlEtl.Jobs
                 if (sourceItem == null) continue;
 
                 // Chuyển đổi phần tử con thành ExpandoObject nếu cần.
-                var itemAsExpando = (sourceItem is ExpandoObject expando)
+                var itemAsExpando = sourceItem is ExpandoObject expando
                     ? expando
                     : ConvertToExando(sourceItem);
 

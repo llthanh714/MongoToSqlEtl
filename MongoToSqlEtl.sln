@@ -3,7 +3,11 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36221.1
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MongoToSqlEtl", "MongoToSqlEtl\MongoToSqlEtl.csproj", "{EFC452CA-256E-4078-BDEA-0C5EC104F96A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DashboardService", "MongoToSqlEtl\DashboardService.csproj", "{EFC452CA-256E-4078-BDEA-0C5EC104F96A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MongoToSqlEtl.Jobs", "MongoToSqlEtl.Jobs.Shared\MongoToSqlEtl.Jobs.csproj", "{17F4FAF0-F5D2-4551-A513-D840CE21B844}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EtlWorkerService", "EtlWorkerService\EtlWorkerService.csproj", "{2F58BC77-4CDD-4344-AE3A-A049958C4C70}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +19,14 @@ Global
 		{EFC452CA-256E-4078-BDEA-0C5EC104F96A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{EFC452CA-256E-4078-BDEA-0C5EC104F96A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{EFC452CA-256E-4078-BDEA-0C5EC104F96A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{17F4FAF0-F5D2-4551-A513-D840CE21B844}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{17F4FAF0-F5D2-4551-A513-D840CE21B844}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{17F4FAF0-F5D2-4551-A513-D840CE21B844}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{17F4FAF0-F5D2-4551-A513-D840CE21B844}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2F58BC77-4CDD-4344-AE3A-A049958C4C70}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2F58BC77-4CDD-4344-AE3A-A049958C4C70}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2F58BC77-4CDD-4344-AE3A-A049958C4C70}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2F58BC77-4CDD-4344-AE3A-A049958C4C70}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

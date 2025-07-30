@@ -2,7 +2,7 @@
 using ETLBox.ControlFlow;
 using Serilog;
 
-namespace MongoToSqlEtl.Managers
+namespace MongoToSqlEtl.Jobs.Managers
 {
     public class EtlLogManager(IConnectionManager connectionManager, string sourceCollectionName)
     {

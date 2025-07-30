@@ -2,7 +2,7 @@
 using System.Text;
 using System.Text.Json;
 
-namespace MongoToSqlEtl.Services
+namespace MongoToSqlEtl.Jobs.Services
 {
     /// <summary>
     /// An implementation of INotificationService that sends messages to Slack via Incoming Webhooks.

@@ -2,7 +2,7 @@
 using ETLBox.DataFlow;
 using System.Dynamic;
 
-namespace MongoToSqlEtl.Jobs
+namespace MongoToSqlEtl.Jobs.Jobs
 {
     /// <summary>
     /// Một record để chứa các component chính của một pipeline ETL,
