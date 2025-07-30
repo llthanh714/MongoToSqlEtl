@@ -88,8 +88,7 @@ namespace MongoToSqlEtl.Jobs
             // Bước 2.4.1: Làm phẳng cấp 2
             var flattenDispenseBatch = CreateFlattenComponent(
                 "dispensebatchdetail",
-                "patientorderitemsuid",
-                "orderitemuid" // Giả định khóa của patientorderitem là 'orderitemuid'
+                "patientorderitemsuid"
             );
             multicastItems.LinkTo(flattenDispenseBatch, item => ((IDictionary<string, object?>)item).ContainsKey("dispensebatchdetail"));
             flattenDispenseBatch.LinkErrorTo(logErrors);

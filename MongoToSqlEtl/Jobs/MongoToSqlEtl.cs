@@ -339,9 +339,9 @@ namespace MongoToSqlEtl.Jobs
         /// Nó sẽ giữ lại TẤT CẢ các trường của các phần tử con.
         /// </summary>
         protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(
-    string arrayFieldName,
-    string foreignKeyName,
-    string parentIdFieldName = "_id")
+            string arrayFieldName,
+            string foreignKeyName,
+            string parentIdFieldName = "_id")
         {
             // Hàm được truyền vào RowMultiplication bây giờ là một hàm iterator.
             return new RowMultiplication<ExpandoObject, ExpandoObject>(
@@ -357,42 +357,43 @@ namespace MongoToSqlEtl.Jobs
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
 
-            // BƯỚC 1: "Chụp" ID của cha vào một biến cục bộ ngay lập tức.
             if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
             {
                 yield break;
             }
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
 
-            // BƯỚC 2: Kiểm tra xem mảng con có tồn tại không.
             if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value is not IEnumerable<object> items)
             {
                 yield break;
             }
 
-            // ✨ ĐIỂM THAY ĐỔI QUAN TRỌNG NHẤT:
-            // Tạo một bản sao của danh sách item con. Thao tác .ToList() sẽ sao chép
-            // tất cả các item vào một List mới, nằm trong một vùng nhớ an toàn,
-            // độc lập với đối tượng 'parentRow' gốc. Điều này ngăn chặn lỗi AccessViolationException.
-            var safeItemList = items.ToList();
-
-            // BƯỚC 3: Bây giờ, lặp qua danh sách an toàn này.
-            foreach (var sourceItem in safeItemList)
+            // Lặp trực tiếp trên IEnumerable, không dùng ToList()
+            foreach (var sourceItem in items)
             {
                 if (sourceItem == null) continue;
 
+                // Tạo bản sao độc lập của item con để đảm bảo an toàn luồng
                 var itemAsExpando = (sourceItem is ExpandoObject expando)
                     ? expando
                     : ConvertToExando(sourceItem);
 
                 if (itemAsExpando == null) continue;
 
-                var finalItemDict = (IDictionary<string, object?>)itemAsExpando;
+                // Tạo một ExpandoObject mới để tránh thay đổi đối tượng gốc trong luồng dữ liệu
+                var safeItemCopy = new ExpandoObject();
+                var safeItemDict = (IDictionary<string, object?>)safeItemCopy;
 
-                // Thao tác ghi này bây giờ hoàn toàn an toàn.
-                finalItemDict[foreignKeyName] = parentIdAsString;
+                // Sao chép tất cả các thuộc tính từ item gốc sang bản sao an toàn
+                foreach (var kvp in itemAsExpando)
+                {
+                    safeItemDict[kvp.Key] = kvp.Value;
+                }
 
-                yield return (ExpandoObject)finalItemDict;
+                // Thao tác ghi bây giờ hoàn toàn an toàn trên bản sao
+                safeItemDict[foreignKeyName] = parentIdAsString;
+
+                yield return safeItemCopy;
             }
         }
 
