@@ -164,17 +164,39 @@ namespace MongoToSqlEtl.Common
                 return;
             }
 
-            // FIX: The switch expression is updated to handle JsonElement correctly,
-            // preventing cast errors when writing to the database.
+            // FIX: Cập nhật logic để xử lý chuyển đổi từ string sang boolean
             target[key] = value switch
             {
                 null => DBNull.Value,
                 DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
                 ObjectId oid => oid.ToString(),
-                JsonElement jsonElem => HandleJsonElement(jsonElem), // Handle JsonElement before other types
-                string str => str,
+                JsonElement jsonElem => HandleJsonElement(jsonElem),
+
+                // ✨ LOGIC MỚI: Ưu tiên xử lý chuỗi trước
+                string str => ConvertStringToTypedValue(str),
+
                 IEnumerable enumerable when value is not string => HandleEnumerable(enumerable, key, keepAsObjectFields),
                 _ => value
+            };
+        }
+
+        /// <summary>
+        /// Thêm phương thức helper mới này vào class DataTransformer
+        /// </summary>
+        private static object ConvertStringToTypedValue(string str)
+        {
+            // Nếu là chuỗi rỗng, coi như là NULL
+            if (string.IsNullOrWhiteSpace(str))
+            {
+                return DBNull.Value;
+            }
+
+            // Thử chuyển đổi thành boolean cho các giá trị phổ biến
+            return str.ToLowerInvariant() switch
+            {
+                "true" or "1" => true,
+                "false" or "0" => false,
+                _ => str // Nếu không phải, giữ nguyên giá trị chuỗi gốc
             };
         }
 
