@@ -1,9 +1,6 @@
 ﻿using Hangfire;
-using Hangfire.Console;
 using Hangfire.Dashboard.BasicAuthorization;
-using Hangfire.SqlServer;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using MongoToSqlEtl.Jobs.Jobs;
 using Serilog;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
@@ -32,21 +29,6 @@ try
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
     if (string.IsNullOrWhiteSpace(hangfireConfig))
         throw new InvalidOperationException("Connection string 'Hangfire' not found.");
-
-    builder.Services.AddHangfire(configuration => configuration
-        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
-        .UseSimpleAssemblyNameTypeSerializer()
-        .UseRecommendedSerializerSettings()
-        .UseSqlServerStorage(hangfireConfig.Replace("__DB_PASSWORD__", sqlPassword), new SqlServerStorageOptions
-        {
-            JobExpirationCheckInterval = TimeSpan.FromDays(15),
-            CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
-            SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
-            QueuePollInterval = TimeSpan.FromSeconds(30),
-            UseRecommendedIsolationLevel = true,
-            DisableGlobalLocks = true // Recommended for performance
-        })
-        .UseConsole());
 
 
     _ = builder.WebHost.ConfigureKestrel(serverOptions =>
@@ -99,17 +81,6 @@ try
     };
 
     app.UseHangfireDashboard("/etl", hangfireOptions);
-
-    RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
-        "minutely-patientorder",
-        service => service.RunAsync(null), "*/2 * * * *",
-            new RecurringJobOptions
-            {
-                TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),
-            }
-    );
-
-    // BackgroundJob.Enqueue<PatientOrdersEtlJob>(service => service.RunAsync(null));
 
     Log.Information("Application initialization completed. Hangfire Dashboard is running at /etl.");
 
