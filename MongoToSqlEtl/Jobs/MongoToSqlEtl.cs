@@ -37,7 +37,7 @@ namespace MongoToSqlEtl.Jobs
             SqlConnectionManager = sqlConnectionManager;
             MongoClient = mongoClient;
             NotificationService = notificationService;
-            LogManager = new EtlLogManager(sqlConnectionManager, SourceCollectionName);
+            LogManager = new EtlLogManager(sqlConnectionManager, mongoClient, MongoDatabaseName, SourceCollectionName);
             FailedRecordManager = new EtlFailedRecordManager(sqlConnectionManager, SourceCollectionName);
         }
 
