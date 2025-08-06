@@ -3,12 +3,14 @@ using ETLBox.SqlServer;
 using Hangfire;
 using Hangfire.Console;
 using Hangfire.Dashboard.BasicAuthorization;
+using Hangfire.Server;
 using Hangfire.SqlServer;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using MongoDB.Driver;
 using MongoToSqlEtl.Jobs;
 using MongoToSqlEtl.Services;
 using Serilog;
+using System.Linq.Expressions;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 
@@ -17,8 +19,8 @@ Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .Enrich.FromLogContext()
     .WriteTo.Console()
-    //.WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
-    //    outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
 try
@@ -158,16 +160,60 @@ try
     app.UseHangfireDashboard("/etl", hangfireOptions);
 
     // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
-    RecurringJob.AddOrUpdate<PatientOrdersEtlJob>(
-        "minutely-patientorder",
-        service => service.RunAsync(null), "*/2 * * * *",
-            new RecurringJobOptions
-            {
-                TimeZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Bangkok"),
-            }
-    );
+    var recurringJobs = app.Services.GetRequiredService<IConfiguration>()
+                           .GetSection("RecurringJobs")
+                           .Get<List<JobSettings>>();
 
-    // BackgroundJob.Enqueue<PatientOrdersEtlJob>(service => service.RunAsync(null));
+    if (recurringJobs != null)
+    {
+        using var serviceScope = app.Services.CreateScope();
+        var serviceProvider = serviceScope.ServiceProvider;
+
+        foreach (var jobSetting in recurringJobs.Where(j => j.Enabled))
+        {
+            try
+            {
+                var jobType = Type.GetType(jobSetting.JobType);
+                if (jobType == null)
+                {
+                    Log.Warning("Recurring Job Type '{JobType}' not found. Skipping registration.", jobSetting.JobType);
+                    continue;
+                }
+
+                var jobInstance = serviceProvider.GetRequiredService(jobType);
+
+                var runAsyncMethod = jobType.GetMethod("RunAsync", [typeof(PerformContext), typeof(int)]);
+
+                if (runAsyncMethod == null)
+                {
+                    Log.Warning("Recurring Job Type '{JobType}' does not have a suitable RunAsync method. Skipping registration.", jobSetting.JobType);
+                    continue;
+                }
+
+                var instanceConst = Expression.Constant(jobInstance);
+                var nullContext = Expression.Constant(null, typeof(PerformContext));
+                var maxBatchInterval = Expression.Constant(jobSetting.MaxBatchIntervalInMinutes);
+                var call = Expression.Call(instanceConst, runAsyncMethod, nullContext, maxBatchInterval);
+                var lambda = Expression.Lambda<Func<Task>>(call);
+
+                RecurringJob.AddOrUpdate(
+                    jobSetting.Name,
+                    lambda,
+                    jobSetting.Cron,
+                    new RecurringJobOptions
+                    {
+                        TimeZone = TimeZoneInfo.FindSystemTimeZoneById(jobSetting.TimeZone),
+                    }
+                );
+
+                Log.Information("Successfully registered recurring job: '{JobName}' with schedule: '{Cron}'", jobSetting.Name, jobSetting.Cron);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to register recurring job: '{JobName}'. Please check the configuration.", jobSetting.Name);
+            }
+        }
+    }
 
     Log.Information("Application initialization completed. Hangfire Dashboard is running at /etl.");
 

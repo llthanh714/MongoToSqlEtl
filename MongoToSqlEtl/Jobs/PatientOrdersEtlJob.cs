@@ -29,10 +29,10 @@ namespace MongoToSqlEtl.Jobs
             "stg_dispensebatchdetail"
         ];
 
-        public new async Task RunAsync(PerformContext? context)
+        public new async Task RunAsync(PerformContext? context, int maxBatchIntervalInMinutes)
         {
             context?.WriteLine("Starting job execution...");
-            await base.RunAsync(context);
+            await base.RunAsync(context, maxBatchIntervalInMinutes);
             context?.WriteLine("Job execution completed.");
         }
 

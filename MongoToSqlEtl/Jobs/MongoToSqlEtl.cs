@@ -31,7 +31,6 @@ namespace MongoToSqlEtl.Jobs
         protected abstract List<string> StagingTables { get; }
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
-        protected virtual int MaxBatchIntervalInMinutes => 120;
 
         protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
         {
@@ -58,7 +57,7 @@ namespace MongoToSqlEtl.Jobs
         /// runs at any given time. The timeout is a safeguard to prevent deadlocks if a job instance crashes.
         /// </summary>
         [DisableConcurrentExecution(timeoutInSeconds: 15 * 60)] // (15 minutes)
-        public async Task RunAsync(PerformContext? context)
+        public async Task RunAsync(PerformContext? context, int maxBatchIntervalInMinutes)
         {
             int logId = 0;
             List<string> pendingFailedRecordIds = [];
@@ -71,7 +70,7 @@ namespace MongoToSqlEtl.Jobs
                 var now = DateTime.UtcNow;
                 var lastSuccessfulRun = LogManager.GetLastSuccessfulWatermark();
 
-                var potentialEndDate = lastSuccessfulRun.AddMinutes(MaxBatchIntervalInMinutes);
+                var potentialEndDate = lastSuccessfulRun.AddMinutes(maxBatchIntervalInMinutes);
                 var endDate = potentialEndDate < now ? potentialEndDate : now;
 
                 if (endDate <= lastSuccessfulRun)
