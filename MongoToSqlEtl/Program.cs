@@ -19,7 +19,7 @@ Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .Enrich.FromLogContext()
     .WriteTo.Console()
-    .WriteTo.File("Logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
+    .WriteTo.File("logs/etl-log-.txt", rollingInterval: RollingInterval.Day,
         outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
@@ -80,6 +80,7 @@ try
 
     // Đăng ký các Job ETL
     // Dùng AddTransient để mỗi lần Hangfire chạy job, nó sẽ tạo một instance mới.
+    builder.Services.AddTransient<PatientsEtlJob>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
     // --- STEP 4: Cấu hình Hangfire ---

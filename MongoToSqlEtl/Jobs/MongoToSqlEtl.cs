@@ -362,13 +362,25 @@ namespace MongoToSqlEtl.Jobs
             }
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
 
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value is not IEnumerable<object> items)
+            // Lấy giá trị của trường cần làm phẳng.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
             {
                 yield break;
             }
 
-            // Lặp trực tiếp trên IEnumerable, không dùng ToList()
-            foreach (var sourceItem in items)
+            // Chuẩn hóa dữ liệu: coi cả object đơn và danh sách object như một danh sách để xử lý.
+            var itemsAsList = new List<object>();
+            if (value is IEnumerable<object> list && value is not string)
+            {
+                itemsAsList.AddRange(list);
+            }
+            else
+            {
+                itemsAsList.Add(value);
+            }
+
+            // Lặp qua danh sách đã được chuẩn hóa.
+            foreach (var sourceItem in itemsAsList)
             {
                 if (sourceItem == null) continue;
 
@@ -484,20 +496,29 @@ namespace MongoToSqlEtl.Jobs
             // Lấy ID của đối tượng cha để gán làm khóa ngoại cho các đối tượng con.
             if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
             {
-                // Nếu không có ID cha, không thể tạo liên kết, bỏ qua.
                 yield break;
             }
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
 
-            // Tìm và kiểm tra xem trường cần làm phẳng có phải là một danh sách hay không.
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value is not IEnumerable<object> items)
+            // Lấy giá trị của trường cần làm phẳng.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
             {
-                // Nếu không phải danh sách, không có gì để làm phẳng.
                 yield break;
             }
 
-            // Lặp qua từng phần tử trong mảng con.
-            foreach (var sourceItem in items)
+            // Chuẩn hóa dữ liệu: coi cả object đơn và danh sách object như một danh sách để xử lý.
+            var itemsAsList = new List<object>();
+            if (value is IEnumerable<object> list && value is not string)
+            {
+                itemsAsList.AddRange(list);
+            }
+            else
+            {
+                itemsAsList.Add(value);
+            }
+
+            // Lặp qua từng phần tử trong danh sách đã được chuẩn hóa.
+            foreach (var sourceItem in itemsAsList)
             {
                 if (sourceItem == null) continue;
 
