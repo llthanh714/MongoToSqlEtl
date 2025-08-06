@@ -47,7 +47,13 @@ namespace MongoToSqlEtl.Jobs
 
             // ================== FLOW 1: patients ==================
             var transformAndMapPatients = CreateTransformAndMapComponent([.. patientsDef.Columns.Select(c => c.Name)]);
-            var destPatients = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientTable);
+            // var destPatients = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientTable);
+
+            var destPatients = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientTable)
+            {
+                MergeMode = MergeMode.Delta,
+                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+            };
 
             multicastPatients.LinkTo(transformAndMapPatients);
             transformAndMapPatients.LinkTo(destPatients);
@@ -60,7 +66,14 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientsaddressDef.Columns.Select(c => c.Name)]
             );
-            var destPatientsAddress = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable);
+            
+            // var destPatientsAddress = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable);
+
+            var destPatientsAddress = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable)
+            {
+                MergeMode = MergeMode.Delta,
+                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+            };
 
             multicastPatients.LinkTo(flattenAndTransformPatientsAddress, o => ((IDictionary<string, object?>)o).ContainsKey("address"));
             flattenAndTransformPatientsAddress.LinkTo(destPatientsAddress);
@@ -73,7 +86,14 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientscontactDef.Columns.Select(c => c.Name)]
             );
-            var destPatientsContact = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientContactTable);
+            
+            // var destPatientsContact = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientContactTable);
+
+            var destPatientsContact = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientContactTable)
+            {
+                MergeMode = MergeMode.Delta,
+                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+            };
 
             multicastPatients.LinkTo(flattenAndTransformPatientsContact, o => ((IDictionary<string, object?>)o).ContainsKey("contact"));
             flattenAndTransformPatientsContact.LinkTo(destPatientsContact);

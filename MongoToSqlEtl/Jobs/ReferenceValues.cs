@@ -38,7 +38,12 @@ namespace MongoToSqlEtl.Jobs
 
             // 3. etl cho referencevalues
             var transformAndMapObjects = CreateTransformAndMapComponent([.. referencevaluesDef.Columns.Select(c => c.Name)]);
-            var destObjects = new DbDestination<ExpandoObject>(SqlConnectionManager, DestReferenceValuesTable);
+
+            var destObjects = new DbMerge<ExpandoObject>(SqlConnectionManager, DestReferenceValuesTable)
+            {
+                MergeMode = MergeMode.Delta,
+                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+            };
 
             source.LinkTo(transformAndMapObjects);
             transformAndMapObjects.LinkTo(destObjects);
