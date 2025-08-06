@@ -81,6 +81,7 @@ try
     // Đăng ký các Job ETL
     // Dùng AddTransient để mỗi lần Hangfire chạy job, nó sẽ tạo một instance mới.
     builder.Services.AddTransient<PatientsEtlJob>();
+    builder.Services.AddTransient<ReferenceValues>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
     // --- STEP 4: Cấu hình Hangfire ---
