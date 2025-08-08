@@ -48,18 +48,14 @@ namespace MongoToSqlEtl.Jobs
             int logId = 0;
             try
             {
-                // ✅ SỬA ĐỔI: Logic tính toán `recordsToSkip` được thêm vào ở đây.
                 long recordsToSkip = 0;
                 if (jobSettings.Backfill.Enabled)
                 {
-                    // Lấy tổng số bản ghi đã xử lý trong các lần backfill trước để biết cần skip bao nhiêu.
                     recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
                 }
 
-                // ✅ SỬA ĐỔI: Truyền `recordsToSkip` (kiểu long) vào làm tham số đầu tiên.
                 var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings.Backfill.Enabled);
 
-                // Đoạn code kiểm tra batchData.Any() bị sai, sửa lại như sau:
                 if (batchData.Count == 0)
                 {
                     var message = jobSettings.Backfill.Enabled
@@ -70,13 +66,11 @@ namespace MongoToSqlEtl.Jobs
                     return;
                 }
 
-                // Lấy watermark cũ chỉ để phục vụ việc ghi log.
                 var previousWatermark = LogManager.GetLastSuccessfulWatermark();
                 logId = LogManager.StartNewLogEntry(previousWatermark, newWatermark);
 
                 await TruncateStagingTablesAsync(context);
 
-                // Chữ ký của BuildPipeline cũng cần được cập nhật để bỏ tham số không dùng đến
                 var pipeline = BuildPipeline(batchData, context);
 
                 context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}' with {batchData.Count} records...");
@@ -91,7 +85,7 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine("Network execution has finished.");
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
-                long failedCount = 0; // Giả định không có lỗi, bạn có thể thay đổi nếu cần
+                long failedCount = 0;
 
                 context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful (Total Processed): {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
@@ -110,9 +104,6 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
-        /// <summary>
-        /// ✅ SỬA ĐỔI: Chứa logic cốt lõi để tìm nạp dữ liệu theo 2 chế độ riêng biệt.
-        /// </summary>
         protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, bool isBackfill)
         {
             var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
@@ -123,8 +114,8 @@ namespace MongoToSqlEtl.Jobs
             if (isBackfill)
             {
                 Log.Information("[{JobName}] Running in Backfill mode using skip/limit. Skipping: {Skip}, Taking: {Take}", SourceCollectionName, recordsToSkip, batchSize);
-                filter = filterBuilder.Empty; // Không cần filter
-                sort = Builders<BsonDocument>.Sort.Ascending("_id"); // Vẫn sort để đảm bảo thứ tự nhất quán
+                filter = filterBuilder.Empty; // No filter needed
+                sort = Builders<BsonDocument>.Sort.Ascending("_id"); // Still sort for consistent order
             }
             else
             {
@@ -143,7 +134,6 @@ namespace MongoToSqlEtl.Jobs
 
             if (documents.Count == 0)
             {
-                // Trả về watermark rỗng để báo hiệu đã hết dữ liệu
                 return ([], new EtlWatermark(DateTime.MinValue, null));
             }
 
@@ -156,7 +146,156 @@ namespace MongoToSqlEtl.Jobs
             return (expandoData, newWatermark);
         }
 
-        #region Unchanged Methods
+
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "_id")
+        {
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName));
+        }
+
+        /// <summary>
+        /// Xử lý đúng đối tượng JsonElement khi làm phẳng mảng.
+        /// </summary>
+        private static IEnumerable<ExpandoObject> Flatten(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, string parentIdFieldName)
+        {
+            var parentAsDict = (IDictionary<string, object?>)parentRow;
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
+            {
+                yield break;
+            }
+            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
+            {
+                yield break;
+            }
+
+            var itemsToProcess = new List<object>();
+
+            // Logic mới: Kiểm tra nếu là JsonElement dạng mảng thì lặp qua nó
+            if (value is JsonElement jsonElement && jsonElement.ValueKind == JsonValueKind.Array)
+            {
+                itemsToProcess.AddRange(jsonElement.EnumerateArray().Select(e => (object)e));
+            }
+            else if (value is IEnumerable<object> list && value is not string)
+            {
+                itemsToProcess.AddRange(list);
+            }
+            else
+            {
+                // Coi như là một danh sách chỉ có một phần tử
+                itemsToProcess.Add(value);
+            }
+
+            foreach (var item in itemsToProcess)
+            {
+                if (item == null) continue;
+                var itemAsExpando = ConvertToExando(item);
+                if (itemAsExpando == null) continue;
+
+                var itemCopy = new ExpandoObject();
+                var itemDict = (IDictionary<string, object?>)itemCopy;
+
+                foreach (var kvp in (IDictionary<string, object?>)itemAsExpando)
+                {
+                    itemDict[kvp.Key] = kvp.Value;
+                }
+
+                itemDict[foreignKeyName] = parentIdAsString;
+                yield return itemCopy;
+            }
+        }
+
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName = "_id", HashSet<string>? keepAsObjectFields = null)
+        {
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndTransform(parentRow, arrayFieldName, foreignKeyName, targetColumns, parentIdFieldName, keepAsObjectFields));
+        }
+
+        /// <summary>
+        /// Xử lý đúng đối tượng JsonElement khi làm phẳng và biến đổi mảng.
+        /// </summary>
+        private static IEnumerable<ExpandoObject> FlattenAndTransform(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName, HashSet<string>? keepAsObjectFields)
+        {
+            var parentAsDict = (IDictionary<string, object?>)parentRow;
+
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
+            {
+                yield break;
+            }
+            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
+            {
+                yield break;
+            }
+
+            var itemsToProcess = new List<object>();
+
+            // Logic mới: Kiểm tra nếu là JsonElement dạng mảng thì lặp qua nó
+            if (value is JsonElement jsonElement && jsonElement.ValueKind == JsonValueKind.Array)
+            {
+                itemsToProcess.AddRange(jsonElement.EnumerateArray().Select(e => (object)e));
+            }
+            else if (value is IEnumerable<object> list && value is not string)
+            {
+                itemsToProcess.AddRange(list);
+            }
+            else
+            {
+                // Coi như là một danh sách chỉ có một phần tử
+                itemsToProcess.Add(value);
+            }
+
+            foreach (var item in itemsToProcess)
+            {
+                if (item == null) continue;
+                var itemAsExpando = ConvertToExando(item);
+                if (itemAsExpando == null) continue;
+
+                var itemAsDict = (IDictionary<string, object?>)itemAsExpando;
+                itemAsDict[foreignKeyName] = parentIdAsString;
+
+                var transformedItem = DataTransformer.TransformObject(itemAsExpando, targetColumns, keepAsObjectFields);
+                yield return transformedItem;
+            }
+        }
+
+        // ... các phương thức không thay đổi khác ...
+        protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
+        {
+            return new RowTransformation<ExpandoObject>(row => DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields));
+        }
+
+        protected static ExpandoObject? ConvertToExando(object obj)
+        {
+            try
+            {
+                if (obj is BsonDocument bsonDoc)
+                {
+                    var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
+                    return JsonSerializer.Deserialize<ExpandoObject>(json);
+                }
+
+                if (obj is JsonElement jsonElem)
+                {
+                    var rawJson = jsonElem.GetRawText();
+                    if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.Trim().StartsWith('{'))
+                    {
+                        return null;
+                    }
+                    return JsonSerializer.Deserialize<ExpandoObject>(rawJson);
+                }
+
+                var generalJson = JsonSerializer.Serialize(obj);
+                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
+                return generalExpando;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}, Object Data: {@Object}", obj?.GetType().FullName ?? "null", obj);
+                return null;
+            }
+        }
+
         protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
             return new CustomDestination<ETLBoxError>((error, rowIndex) =>
@@ -217,6 +356,7 @@ namespace MongoToSqlEtl.Jobs
                 }
             });
         }
+
         protected async Task TruncateStagingTablesAsync(PerformContext? context)
         {
             var jobName = SourceCollectionName;
@@ -266,92 +406,5 @@ namespace MongoToSqlEtl.Jobs
                 throw new Exception("Failed to truncate staging tables via stored procedure, aborting job execution.", ex);
             }
         }
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "_id")
-        {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName));
-        }
-        private static IEnumerable<ExpandoObject> Flatten(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, string parentIdFieldName)
-        {
-            var parentAsDict = (IDictionary<string, object?>)parentRow;
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
-            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
-            var itemsAsList = new List<object>();
-            if (value is IEnumerable<object> list && value is not string) { itemsAsList.AddRange(list); } else { itemsAsList.Add(value); }
-            foreach (var sourceItem in itemsAsList)
-            {
-                if (sourceItem == null) continue;
-                var itemAsExpando = (sourceItem is ExpandoObject expando) ? expando : ConvertToExando(sourceItem);
-                if (itemAsExpando == null) continue;
-                var safeItemCopy = new ExpandoObject();
-                var safeItemDict = (IDictionary<string, object?>)safeItemCopy;
-                foreach (var kvp in itemAsExpando) { safeItemDict[kvp.Key] = kvp.Value; }
-                safeItemDict[foreignKeyName] = parentIdAsString;
-                yield return safeItemCopy;
-            }
-        }
-        protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
-        {
-            return new RowTransformation<ExpandoObject>(row => DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields));
-        }
-        protected static ExpandoObject? ConvertToExando(object obj)
-        {
-            try
-            {
-                if (obj is BsonDocument bsonDoc)
-                {
-                    var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
-                    return JsonSerializer.Deserialize<ExpandoObject>(json);
-                }
-
-                if (obj is JsonElement jsonElem)
-                {
-                    // Lấy văn bản JSON thô từ JsonElement và deserialize trực tiếp từ đó.
-                    var rawJson = jsonElem.GetRawText();
-
-                    // Nếu chuỗi JSON rỗng hoặc không phải là một đối tượng, trả về null.
-                    if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.Trim().StartsWith('{'))
-                    {
-                        return null;
-                    }
-
-                    return JsonSerializer.Deserialize<ExpandoObject>(rawJson);
-                }
-
-                // Nhánh dự phòng cho các kiểu đối tượng khác.
-                var generalJson = JsonSerializer.Serialize(obj);
-                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
-                return generalExpando;
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}, Object Data: {@Object}", obj?.GetType().FullName ?? "null", obj);
-                return null;
-            }
-        }
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName = "_id", HashSet<string>? keepAsObjectFields = null)
-        {
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndTransform(parentRow, arrayFieldName, foreignKeyName, targetColumns, parentIdFieldName, keepAsObjectFields));
-        }
-        private static IEnumerable<ExpandoObject> FlattenAndTransform(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName, HashSet<string>? keepAsObjectFields)
-        {
-            var parentAsDict = (IDictionary<string, object?>)parentRow;
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
-            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
-            var itemsAsList = new List<object>();
-            if (value is IEnumerable<object> list && value is not string) { itemsAsList.AddRange(list); } else { itemsAsList.Add(value); }
-            foreach (var sourceItem in itemsAsList)
-            {
-                if (sourceItem == null) continue;
-                var itemAsExpando = (sourceItem is ExpandoObject expando) ? expando : ConvertToExando(sourceItem);
-                if (itemAsExpando == null) continue;
-                var itemAsDict = (IDictionary<string, object?>)itemAsExpando;
-                itemAsDict[foreignKeyName] = parentIdAsString;
-                var transformedItem = DataTransformer.TransformObject(itemAsExpando, targetColumns, keepAsObjectFields);
-                yield return transformedItem;
-            }
-        }
-        #endregion
     }
 }
