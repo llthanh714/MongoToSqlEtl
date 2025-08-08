@@ -1,4 +1,5 @@
 ﻿using ETLBox;
+using ETLBox.Licensing;
 using ETLBox.SqlServer;
 using Hangfire;
 using Hangfire.Console;
@@ -14,7 +15,6 @@ using System.Linq.Expressions;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 
-// --- STEP 1: Cấu hình Serilog ---
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
     .Enrich.FromLogContext()
@@ -23,71 +23,54 @@ Log.Logger = new LoggerConfiguration()
         outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
+
+LicenseService.CurrentKey = "2025-09-22|TRIAL|ONLY FOR PERSONAL OR TESTING PURPOSES|CUSTOMER:Le Long Thanh|MAIL:llthanh714@gmail.com||jKQA+uo+BcY7ZHBXmKMyf6gdOIhhD34RepQHEMERQOdQ2Kj6t6nBLmyZnlh4K8UZmuUZBVxHraOnVrJwelVCjb2fko+Lj9vSXmydzkv1x9YFVK0L06Sm8CMntvMJREsvh97p3rdckV53TWhSH4muPPTdfwuAfjW4C7umRAdO3dE=";
+
 try
 {
     Log.Information("Starting ETL Host application initialization..");
 
     var builder = WebApplication.CreateBuilder(args);
 
-    // Kiểm tra và lấy mật khẩu từ biến môi trường
     var sqlPassword = Environment.GetEnvironmentVariable("__DB_PASSWORD__", EnvironmentVariableTarget.Machine);
     var mongoPassword = Environment.GetEnvironmentVariable("__MONGOGDB_PASSWORD__", EnvironmentVariableTarget.Machine);
     var hangfireDashboardPassword = Environment.GetEnvironmentVariable("__HANGFIRE_DASHBOARD_PASSWORD__", EnvironmentVariableTarget.Machine);
     var kestrelCertPassword = Environment.GetEnvironmentVariable("__KESTREL_CERT_PASSWORD__", EnvironmentVariableTarget.Machine);
 
+    if (string.IsNullOrWhiteSpace(sqlPassword)) throw new Exception("__DB_PASSWORD__ environment variable is not set.");
+    if (string.IsNullOrWhiteSpace(mongoPassword)) throw new Exception("__MONGOGDB_PASSWORD__ environment variable is not set.");
+    if (string.IsNullOrWhiteSpace(hangfireDashboardPassword)) throw new Exception("__HANGFIRE_DASHBOARD_PASSWORD__ environment variable is not set.");
+    if (string.IsNullOrWhiteSpace(kestrelCertPassword)) throw new Exception("__KESTREL_CERT_PASSWORD__ environment variable is not set.");
 
-    if (string.IsNullOrWhiteSpace(sqlPassword))
-        throw new Exception("__DB_PASSWORD__ environment variable is not set.");
-
-    if (string.IsNullOrWhiteSpace(mongoPassword))
-        throw new Exception("__MONGOGDB_PASSWORD__ environment variable is not set.");
-
-    if (string.IsNullOrWhiteSpace(hangfireDashboardPassword))
-        throw new Exception("__HANGFIRE_DASHBOARD_PASSWORD__ environment variable is not set.");
-
-    if (string.IsNullOrWhiteSpace(kestrelCertPassword))
-        throw new Exception("__KESTREL_CERT_PASSWORD__ environment variable is not set.");
-
-
-    // --- STEP 2: Tích hợp Serilog vào ASP.NET Core ---
     builder.Host.UseSerilog();
-
-    // --- STEP 3: Đăng ký các dịch vụ với Dependency Injection ---
-    // Đăng ký IConfiguration để có thể inject vào các lớp khác
     builder.Services.AddSingleton(builder.Configuration);
 
-    // Đăng ký các kết nối DB dưới dạng Singleton
     builder.Services.AddSingleton<IConnectionManager>(sp =>
     {
         var config = sp.GetRequiredService<IConfiguration>();
-        string? cs = config.GetConnectionString("SqlServer") ?? throw new InvalidOperationException("Connection string 'SqlServer' not found.");
+        string cs = config.GetConnectionString("SqlServer") ?? throw new InvalidOperationException("Connection string 'SqlServer' not found.");
         return new SqlConnectionManager(cs.Replace("__DB_PASSWORD__", sqlPassword));
     });
 
     builder.Services.AddSingleton(sp =>
     {
         var config = sp.GetRequiredService<IConfiguration>();
-        string? cs = config.GetConnectionString("MongoDb") ?? throw new InvalidOperationException("Connection string 'MongoDb' not found.");
+        string cs = config.GetConnectionString("MongoDb") ?? throw new InvalidOperationException("Connection string 'MongoDb' not found.");
         return new MongoClient(cs.Replace("__MONGOGDB_PASSWORD__", mongoPassword));
     });
 
-    // Đăng ký các dịch vụ khác
     builder.Services.AddSingleton<INotificationService, SlackNotificationService>(sp =>
     {
         var config = sp.GetRequiredService<IConfiguration>();
         return new SlackNotificationService(config["NotificationSettings:SlackWebhookUrl"]);
     });
 
-    // Đăng ký các Job ETL
-    // Dùng AddTransient để mỗi lần Hangfire chạy job, nó sẽ tạo một instance mới.
     builder.Services.AddTransient<PatientsEtlJob>();
     builder.Services.AddTransient<ReferenceValues>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
-    // --- STEP 4: Cấu hình Hangfire ---
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
-    if (string.IsNullOrWhiteSpace(hangfireConfig))
-        throw new InvalidOperationException("Connection string 'Hangfire' not found.");
+    if (string.IsNullOrWhiteSpace(hangfireConfig)) throw new InvalidOperationException("Connection string 'Hangfire' not found.");
 
     builder.Services.AddHangfire(configuration => configuration
         .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
@@ -100,19 +83,16 @@ try
             SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
             QueuePollInterval = TimeSpan.FromSeconds(5),
             UseRecommendedIsolationLevel = true,
-            DisableGlobalLocks = true // Recommended for performance
+            DisableGlobalLocks = true
         })
-        .UseConsole()); // Tích hợp Hangfire.Console
+        .UseConsole());
 
-    // Thêm Hangfire Server để xử lý các job trong background
     builder.Services.AddHangfireServer();
 
-    // CONFIGURATION FIX: Load Kestrel configuration from appsettings.json
-    _ = builder.WebHost.ConfigureKestrel(serverOptions =>
+    builder.WebHost.ConfigureKestrel(serverOptions =>
     {
         var certConfig = builder.Configuration.GetSection("Kestrel:Certificate");
         var certPath = certConfig["Path"];
-        // Replace placeholder with password from environment variable
         var certPassword = certConfig["Password"]?.Replace("__KESTREL_CERT_PASSWORD__", kestrelCertPassword);
 
         if (string.IsNullOrEmpty(certPath) || string.IsNullOrEmpty(certPassword))
@@ -129,26 +109,22 @@ try
         serverOptions.Listen(IPAddress.Any, 7272, listenOptions =>
         {
             listenOptions.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
-            _ = listenOptions.UseHttps();
+            listenOptions.UseHttps();
         });
     });
 
-    // --- STEP 5: Build ứng dụng ---
     var app = builder.Build();
 
-    // --- STEP 6: Cấu hình Request Pipeline và Dashboard ---
     app.UseSerilogRequestLogging();
 
     var hangfireOptions = new DashboardOptions
     {
-        Authorization =
-        [
+        Authorization = [
             new BasicAuthAuthorizationFilter(new BasicAuthAuthorizationFilterOptions
             {
                 RequireSsl = true,
                 LoginCaseSensitive = true,
-                Users =
-                [
+                Users = [
                     new BasicAuthAuthorizationUser
                     {
                         Login = "admin",
@@ -161,7 +137,6 @@ try
 
     app.UseHangfireDashboard("/etl", hangfireOptions);
 
-    // --- STEP 7: Đăng ký các Job định kỳ (Recurring Jobs) ---
     var recurringJobs = app.Services.GetRequiredService<IConfiguration>()
                            .GetSection("RecurringJobs")
                            .Get<List<JobSettings>>();
@@ -184,18 +159,18 @@ try
 
                 var jobInstance = serviceProvider.GetRequiredService(jobType);
 
-                var runAsyncMethod = jobType.GetMethod("RunAsync", [typeof(PerformContext), typeof(int)]);
-
+                // Thay đổi cách lấy phương thức và tạo lambda để truyền JobSettings
+                var runAsyncMethod = jobType.GetMethod("RunAsync", [typeof(PerformContext), typeof(JobSettings)]);
                 if (runAsyncMethod == null)
                 {
-                    Log.Warning("Recurring Job Type '{JobType}' does not have a suitable RunAsync method. Skipping registration.", jobSetting.JobType);
+                    Log.Warning("Recurring Job Type '{JobType}' does not have a suitable RunAsync(PerformContext, JobSettings) method. Skipping.", jobSetting.JobType);
                     continue;
                 }
 
                 var instanceConst = Expression.Constant(jobInstance);
                 var nullContext = Expression.Constant(null, typeof(PerformContext));
-                var maxBatchInterval = Expression.Constant(jobSetting.MaxBatchIntervalInMinutes);
-                var call = Expression.Call(instanceConst, runAsyncMethod, nullContext, maxBatchInterval);
+                var jobSettingsConst = Expression.Constant(jobSetting, typeof(JobSettings));
+                var call = Expression.Call(instanceConst, runAsyncMethod, nullContext, jobSettingsConst);
                 var lambda = Expression.Lambda<Func<Task>>(call);
 
                 RecurringJob.AddOrUpdate(
@@ -219,7 +194,6 @@ try
 
     Log.Information("Application initialization completed. Hangfire Dashboard is running at /etl.");
 
-    // --- STEP 8: Chạy ứng dụng ---
     app.Run();
 }
 catch (Exception ex)

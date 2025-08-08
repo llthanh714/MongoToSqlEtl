@@ -23,14 +23,6 @@ namespace MongoToSqlEtl.Common
             return new RowTransformation<ExpandoObject>(row => TransformObject(row, targetColumns, keepAsObjectFields));
         }
 
-        /// <summary>
-        /// Transform an ExpandoObject to another ExpandoObject based on target columns.
-        /// </summary>
-        /// <param name="sourceRow"></param>
-        /// <param name="targetColumns"></param>
-        /// <param name="keepAsObjectFields"></param>
-        /// <param name="excludeKeys"></param>
-        /// <returns></returns>
         public static ExpandoObject TransformObject(ExpandoObject sourceRow, ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null, HashSet<string>? excludeKeys = null)
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
@@ -50,20 +42,15 @@ namespace MongoToSqlEtl.Common
             {
                 foreach (var key in sourceAsDict.Keys)
                 {
-                    var exclusionSet = excludeKeys != null
-                        ? new HashSet<string>(excludeKeys, StringComparer.OrdinalIgnoreCase)
-                        : null;
-
+                    var exclusionSet = excludeKeys != null ? new HashSet<string>(excludeKeys, StringComparer.OrdinalIgnoreCase) : null;
                     if (exclusionSet != null && exclusionSet.Contains(key))
                         continue;
-
                     MapProperty(sourceAsDict, targetDict, key, keepAsObjectFields);
                 }
             }
 
             if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
             {
-                // Đảm bảo khóa bị loại trừ cũng không được thêm lại ở đây
                 if (excludeKeys == null || !excludeKeys.Contains("_id"))
                 {
                     MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
@@ -72,157 +59,142 @@ namespace MongoToSqlEtl.Common
             return (ExpandoObject)targetDict;
         }
 
-        /// <summary>
-        /// Using Lazy<T> to initialize the SE Asia Time Zone only when needed.
-        /// </summary>
         private static readonly Lazy<TimeZoneInfo> SEAsiaTimeZone = new(() =>
         {
-            try
-            {
-                // Thử tìm TimeZone ID của Windows trước
-                return TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time");
-            }
+            try { return TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"); }
             catch (TimeZoneNotFoundException)
             {
-                // Nếu không được, thử tìm IANA ID (dùng trên Linux/macOS)
-                try
-                {
-                    return TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh");
-                }
-                catch (TimeZoneNotFoundException)
-                {
-                    // Nếu cả hai đều thất bại, tạo một múi giờ tùy chỉnh UTC+7 làm phương án cuối cùng.
-                    return TimeZoneInfo.CreateCustomTimeZone("SE Asia Custom", TimeSpan.FromHours(7), "SE Asia Standard Time (Custom)", "SE Asia Standard Time (Custom)");
-                }
+                try { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh"); }
+                catch (TimeZoneNotFoundException) { return TimeZoneInfo.CreateCustomTimeZone("SE Asia Custom", TimeSpan.FromHours(7), "SE Asia Standard Time (Custom)", "SE Asia Standard Time (Custom)"); }
             }
         });
 
-        /// <summary>
-        /// Handles the conversion of a JsonElement to a database-friendly type.
-        /// </summary>
         private static object HandleJsonElement(JsonElement element)
         {
             switch (element.ValueKind)
             {
                 case JsonValueKind.String:
-                    if (element.TryGetDateTime(out var dt))
-                        return dt;
-                    // FIX: Cast the string to object? to make it compatible with DBNull.Value for the ?? operator.
+                    if (element.TryGetDateTime(out var dt)) return dt;
                     return (object?)element.GetString() ?? DBNull.Value;
-                case JsonValueKind.Number:
-                    return element.GetDecimal();
-                case JsonValueKind.True:
-                    return true;
-                case JsonValueKind.False:
-                    return false;
-                case JsonValueKind.Null:
-                    return DBNull.Value;
-
-                // For complex types, we check for specific BSON patterns or serialize to string.
+                case JsonValueKind.Number: return element.GetDecimal();
+                case JsonValueKind.True: return true;
+                case JsonValueKind.False: return false;
+                case JsonValueKind.Null: return DBNull.Value;
                 case JsonValueKind.Object:
-                    // Check for BSON ObjectId pattern: {"$oid": "..."}
                     if (element.TryGetProperty("$oid", out var oidElement))
                     {
                         return (object?)oidElement.GetString() ?? DBNull.Value;
                     }
-                    // Check for BSON Date pattern: {"$date": "..."}
-                    if (element.TryGetProperty("$date", out var dateElement) && dateElement.TryGetDateTime(out var bsonDate))
+                    if (element.TryGetProperty("$date", out var dateElement))
                     {
-                        return bsonDate;
+                        if (dateElement.ValueKind == JsonValueKind.Object && dateElement.TryGetProperty("$numberLong", out var numberLongElement))
+                        {
+                            if (numberLongElement.ValueKind == JsonValueKind.String && long.TryParse(numberLongElement.GetString(), out var milliseconds))
+                            {
+                                return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds).UtcDateTime;
+                            }
+                            else if (numberLongElement.ValueKind == JsonValueKind.Number && numberLongElement.TryGetInt64(out milliseconds))
+                            {
+                                return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds).UtcDateTime;
+                            }
+                        }
+                        else if (dateElement.TryGetDateTime(out var bsonDate))
+                        {
+                            return bsonDate;
+                        }
                     }
-                    // If it's another type of object (like the one in the error message for an _id),
-                    // convert it to a JSON string to be stored in nvarchar. This solves the InvalidCastException.
                     return element.GetRawText();
-
-                case JsonValueKind.Array:
-                    // Convert array to a JSON string.
-                    return element.GetRawText();
-
-                default:
-                    // Fallback for any other type.
-                    return element.ToString();
+                case JsonValueKind.Array: return element.GetRawText();
+                default: return element.ToString();
             }
         }
 
-        /// <summary>
-        /// Mapping a property from source to target dictionary.
-        /// </summary>
-        /// <param name="source"></param>
-        /// <param name="target"></param>
-        /// <param name="key"></param>
-        /// <param name="keepAsObjectFields"></param>
+        private static bool TryGetOidString(object? obj, out string? oidString)
+        {
+            oidString = null;
+            if (obj is IDictionary<string, object?> dict && dict.Count == 1 && dict.TryGetValue("$oid", out var oidValue))
+            {
+                oidString = oidValue?.ToString();
+                return !string.IsNullOrEmpty(oidString);
+            }
+            return false;
+        }
+
         public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
         {
-            if (target.ContainsKey(key))
-            {
-                return;
-            }
-
+            if (target.ContainsKey(key)) return;
             if (!source.TryGetValue(key, out object? value))
             {
                 target[key] = DBNull.Value;
                 return;
             }
-
-            // FIX: Cập nhật logic để xử lý chuyển đổi từ string sang boolean
+            if (TryGetOidString(value, out var oidString))
+            {
+                target[key] = oidString;
+                return;
+            }
             target[key] = value switch
             {
                 null => DBNull.Value,
                 DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
                 ObjectId oid => oid.ToString(),
                 JsonElement jsonElem => HandleJsonElement(jsonElem),
-
-                // ✨ LOGIC MỚI: Ưu tiên xử lý chuỗi trước
                 string str => ConvertStringToTypedValue(str),
-
                 IEnumerable enumerable when value is not string => HandleEnumerable(enumerable, key, keepAsObjectFields),
                 _ => value
             };
         }
 
         /// <summary>
-        /// Thêm phương thức helper mới này vào class DataTransformer
+        /// ✅ SỬA ĐỔI: Nâng cấp logic để kiểm tra xem chuỗi có phải là JSON chứa `$oid` hay không.
         /// </summary>
         private static object ConvertStringToTypedValue(string str)
         {
-            // Nếu là chuỗi rỗng, coi như là NULL
             if (string.IsNullOrWhiteSpace(str))
             {
                 return DBNull.Value;
             }
 
-            // Thử chuyển đổi thành boolean cho các giá trị phổ biến
+            // --- LOGIC MỚI BẮT ĐẦU TỪ ĐÂY ---
+            // Kiểm tra nhanh xem chuỗi có khả năng là một đối tượng JSON không.
+            var trimmedStr = str.Trim();
+            if (trimmedStr.StartsWith('{') && trimmedStr.EndsWith('}'))
+            {
+                try
+                {
+                    // Thử parse chuỗi thành JSON
+                    using JsonDocument doc = JsonDocument.Parse(trimmedStr);
+                    // Nếu là JSON và có chứa key "$oid", trích xuất giá trị.
+                    if (doc.RootElement.TryGetProperty("$oid", out var oidElement))
+                    {
+                        return oidElement.GetString() ?? (object)DBNull.Value;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Nếu không phải JSON hợp lệ, bỏ qua và để logic bên dưới xử lý.
+                }
+            }
+
             return str.ToLowerInvariant() switch
             {
                 "true" or "1" => true,
                 "false" or "0" => false,
-                _ => str // Nếu không phải, giữ nguyên giá trị chuỗi gốc
+                _ => str
             };
         }
 
-        /// <summary>
-        /// Handles the conversion of an IEnumerable to a database-friendly type.
-        /// </summary>
-        /// <param name="enumerable"></param>
-        /// <param name="key"></param>
-        /// <param name="keepAsObjectFields"></param>
-        /// <returns></returns>
         private static object HandleEnumerable(IEnumerable enumerable, string key, HashSet<string>? keepAsObjectFields)
         {
-            // Kiểm tra xem enumerable có phần tử nào không
             var firstItem = enumerable.Cast<object>().FirstOrDefault();
-            if (firstItem == null && !enumerable.Cast<object>().Any()) // Double check cho trường hợp list chứa 1 phần tử null
+            if (firstItem == null && !enumerable.Cast<object>().Any())
             {
                 return DBNull.Value;
             }
-
             if (keepAsObjectFields != null && keepAsObjectFields.Contains(key))
             {
-                // Vẫn giữ logic quan trọng: tạo list mới để phá vỡ tham chiếu
                 return enumerable.Cast<object>().ToList();
             }
-
-            // Serialize thành JSON cho các trường hợp còn lại
             return JsonSerializer.Serialize(enumerable);
         }
     }

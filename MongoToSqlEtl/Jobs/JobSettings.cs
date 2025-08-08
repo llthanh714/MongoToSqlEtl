@@ -33,8 +33,24 @@
         public bool Enabled { get; set; }
 
         /// <summary>
-        /// Gets or sets the maximum interval, in minutes, for batching operations.
+        /// Số lượng bản ghi tối đa để xử lý trong một lần chạy job.
         /// </summary>
-        public int MaxBatchIntervalInMinutes { get; set; } = 60;
+        public int MaxRecordsPerJob { get; set; } = 1000;
+
+        /// <summary>
+        /// Cấu hình cho việc chạy backfill (lấy lại dữ liệu lịch sử).
+        /// </summary>
+        public BackfillSettings Backfill { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Cài đặt cho chế độ Backfill.
+    /// </summary>
+    public class BackfillSettings
+    {
+        /// <summary>
+        /// Kích hoạt chế độ backfill.
+        /// </summary>
+        public bool Enabled { get; set; }
     }
 }

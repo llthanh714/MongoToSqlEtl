@@ -20,20 +20,20 @@ namespace MongoToSqlEtl.Jobs
 
         protected override List<string> StagingTables => [];
 
-        public new async Task RunAsync(PerformContext? context, int maxBatchIntervalInMinutes)
+        public new async Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
-            context?.WriteLine("Starting job execution...");
-            await base.RunAsync(context, maxBatchIntervalInMinutes);
-            context?.WriteLine("Job execution completed.");
+            context?.WriteLine("Starting job execution for PatientOrders...");
+            await base.RunAsync(context, jobSettings);
+            context?.WriteLine("Job execution for PatientOrders completed.");
         }
 
-        protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context)
+        protected override EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context)
         {
             // 1. Định nghĩa các bảng
             var referencevaluesDef = TableDefinition.FromTableName(SqlConnectionManager, DestReferenceValuesTable);
 
             // 2. Các component nguồn và lỗi
-            var source = CreateMongoDbSource(startDate, endDate, failedIds);
+            var source = new MemorySource<ExpandoObject>(batchData);
             var logErrors = CreateErrorLoggingDestination(context);
 
             // 3. etl cho referencevalues

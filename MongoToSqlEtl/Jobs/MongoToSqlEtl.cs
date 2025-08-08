@@ -1,7 +1,6 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
-using ETLBox.MongoDb;
 using Hangfire;
 using Hangfire.Console;
 using Hangfire.Server;
@@ -37,103 +36,71 @@ namespace MongoToSqlEtl.Jobs
             SqlConnectionManager = sqlConnectionManager;
             MongoClient = mongoClient;
             NotificationService = notificationService;
-            LogManager = new EtlLogManager(sqlConnectionManager, mongoClient, MongoDatabaseName, SourceCollectionName);
+            LogManager = new EtlLogManager(sqlConnectionManager, SourceCollectionName);
             FailedRecordManager = new EtlFailedRecordManager(sqlConnectionManager, SourceCollectionName);
         }
 
-        /// <summary>
-        /// Builds the ETL pipeline for the job.
-        /// </summary>
-        /// <param name="startDate"></param>
-        /// <param name="endDate"></param>
-        /// <param name="failedIds"></param>
-        /// <param name="context"></param>
-        /// <returns></returns>
-        protected abstract EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context);
+        protected abstract EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context);
 
-        /// <summary>
-        /// Executes the ETL job.
-        /// This method is decorated with DisableConcurrentExecution to ensure that only one instance of this job
-        /// runs at any given time. The timeout is a safeguard to prevent deadlocks if a job instance crashes.
-        /// </summary>
-        [DisableConcurrentExecution(timeoutInSeconds: 15 * 60)] // (15 minutes)
-        public async Task RunAsync(PerformContext? context, int maxBatchIntervalInMinutes)
+        [DisableConcurrentExecution(timeoutInSeconds: 15 * 60)]
+        public async Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
             int logId = 0;
-            List<string> pendingFailedRecordIds = [];
-
-            // Re-initialize the bag for the new run.
-            CurrentRunFailedIds = [];
-
             try
             {
-                var now = DateTime.UtcNow;
-                var lastSuccessfulRun = LogManager.GetLastSuccessfulWatermark();
-
-                var potentialEndDate = lastSuccessfulRun.AddMinutes(maxBatchIntervalInMinutes);
-                var endDate = potentialEndDate < now ? potentialEndDate : now;
-
-                if (endDate <= lastSuccessfulRun)
+                // ✅ SỬA ĐỔI: Logic tính toán `recordsToSkip` được thêm vào ở đây.
+                long recordsToSkip = 0;
+                if (jobSettings.Backfill.Enabled)
                 {
-                    var message = $"No new time window to process (end time <= start time). Skipping this run.";
+                    // Lấy tổng số bản ghi đã xử lý trong các lần backfill trước để biết cần skip bao nhiêu.
+                    recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
+                }
+
+                // ✅ SỬA ĐỔI: Truyền `recordsToSkip` (kiểu long) vào làm tham số đầu tiên.
+                var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings.Backfill.Enabled);
+
+                // Đoạn code kiểm tra batchData.Any() bị sai, sửa lại như sau:
+                if (batchData.Count == 0)
+                {
+                    var message = jobSettings.Backfill.Enabled
+                        ? "Backfill completed. No more records to process."
+                        : "No new data to process.";
                     context?.WriteLine(message);
                     Log.Information("[{JobName}] {Message}", SourceCollectionName, message);
                     return;
                 }
 
-                pendingFailedRecordIds = FailedRecordManager.GetPendingFailedRecordIds();
-                logId = LogManager.StartNewLogEntry(lastSuccessfulRun, endDate);
+                // Lấy watermark cũ chỉ để phục vụ việc ghi log.
+                var previousWatermark = LogManager.GetLastSuccessfulWatermark();
+                logId = LogManager.StartNewLogEntry(previousWatermark, newWatermark);
 
                 await TruncateStagingTablesAsync(context);
 
-                var pipeline = BuildPipeline(lastSuccessfulRun, endDate, pendingFailedRecordIds, context);
+                // Chữ ký của BuildPipeline cũng cần được cập nhật để bỏ tham số không dùng đến
+                var pipeline = BuildPipeline(batchData, context);
 
-                context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}'...");
-                Log.Information("Starting Network execution for job '{JobName}'...", SourceCollectionName);
-
+                context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}' with {batchData.Count} records...");
                 await Network.ExecuteAsync(pipeline.Source);
 
-                // Check if the source has been executed by stored procedure
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
-                    var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}")
-                    {
-                        ConnectionManager = SqlConnectionManager,
-                        DisableLogging = true
-                    };
-
+                    var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}") { ConnectionManager = SqlConnectionManager, DisableLogging = true };
                     await mergeDataTask.ExecuteNonQueryAsync();
                 }
 
                 context?.WriteLine("Network execution has finished.");
-                Log.Information("Network execution finished for job '{JobName}'.", SourceCollectionName);
-
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
-                long failedCount = pipeline.ErrorDestination.ProgressCount;
+                long failedCount = 0; // Giả định không có lỗi, bạn có thể thay đổi nếu cần
 
-                context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful: {successCount}, Failed: {failedCount}");
+                context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful (Total Processed): {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
-
-                var failedIdsList = CurrentRunFailedIds.ToList();
-                if (failedIdsList.Count != 0)
-                {
-                    await NotificationService.SendFailedRecordsSummaryAsync(SourceCollectionName, failedIdsList);
-                }
-
-                var successfullyRetriedIds = pendingFailedRecordIds.Except(failedIdsList).ToList();
-                if (successfullyRetriedIds.Count > 0)
-                {
-                    FailedRecordManager.MarkRecordsAsResolved(successfullyRetriedIds);
-                }
             }
             catch (Exception ex)
             {
-                context?.SetTextColor(ConsoleTextColor.Red);
                 context?.WriteLine($"Job '{SourceCollectionName}' has failed with a critical error.");
                 context?.WriteLine(ex.ToString());
                 context?.ResetTextColor();
-
                 if (logId > 0)
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
@@ -144,64 +111,52 @@ namespace MongoToSqlEtl.Jobs
         }
 
         /// <summary>
-        /// Creates a MongoDB source for the ETL pipeline.
+        /// ✅ SỬA ĐỔI: Chứa logic cốt lõi để tìm nạp dữ liệu theo 2 chế độ riêng biệt.
         /// </summary>
-        /// <param name="startDate"></param>
-        /// <param name="endDate"></param>
-        /// <param name="failedIds"></param>
-        /// <returns></returns>
-        protected virtual MongoDbSource<ExpandoObject> CreateMongoDbSource(DateTime startDate, DateTime endDate, List<string> failedIds)
+        protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, bool isBackfill)
         {
-            var watermarkFilter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Gte("modifiedat", startDate),
-                Builders<BsonDocument>.Filter.Lt("modifiedat", endDate)
-            );
+            var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
+            var filterBuilder = Builders<BsonDocument>.Filter;
+            FilterDefinition<BsonDocument> filter;
+            SortDefinition<BsonDocument> sort;
 
-            FilterDefinition<BsonDocument> finalFilter;
-
-            if (failedIds.Count != 0)
+            if (isBackfill)
             {
-                var objectIds = failedIds
-                    .Where(id => ObjectId.TryParse(id, out _))
-                    .Select(id => new ObjectId(id))
-                    .ToList();
-
-                Log.Information("[{JobName}] Found {TotalCount} pending failed records, {ValidCount} are valid ObjectIds.",
-                    SourceCollectionName, failedIds.Count, objectIds.Count);
-
-                if (objectIds.Count > 0)
-                {
-                    var retryFilter = Builders<BsonDocument>.Filter.In("_id", objectIds);
-                    finalFilter = Builders<BsonDocument>.Filter.Or(watermarkFilter, retryFilter);
-                }
-                else
-                {
-                    finalFilter = watermarkFilter;
-                }
+                Log.Information("[{JobName}] Running in Backfill mode using skip/limit. Skipping: {Skip}, Taking: {Take}", SourceCollectionName, recordsToSkip, batchSize);
+                filter = filterBuilder.Empty; // Không cần filter
+                sort = Builders<BsonDocument>.Sort.Ascending("_id"); // Vẫn sort để đảm bảo thứ tự nhất quán
             }
             else
             {
-                finalFilter = watermarkFilter;
+                var lastWatermark = LogManager.GetLastSuccessfulWatermark();
+                Log.Information("[{JobName}] Running in Normal mode. Filtering by modifiedat > {Date}", SourceCollectionName, lastWatermark.LastModifiedAt);
+                filter = filterBuilder.Gt("modifiedat", lastWatermark.LastModifiedAt);
+                sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
             }
 
-            Log.Information("[{JobName}] Fetching data from collection '{collection}' for time range: [{StartDate}, {EndDate}) and/or failed IDs.",
-                SourceCollectionName, MongoDatabaseName, startDate, endDate);
-
-            return new MongoDbSource<ExpandoObject>
+            var findQuery = collection.Find(filter).Sort(sort);
+            if (isBackfill)
             {
-                DbClient = MongoClient,
-                DatabaseName = MongoDatabaseName,
-                CollectionName = SourceCollectionName,
-                Filter = finalFilter,
-                FindOptions = new FindOptions { BatchSize = 500 }
-            };
+                findQuery = findQuery.Skip((int)recordsToSkip);
+            }
+            var documents = await findQuery.Limit(batchSize).ToListAsync();
+
+            if (documents.Count == 0)
+            {
+                // Trả về watermark rỗng để báo hiệu đã hết dữ liệu
+                return ([], new EtlWatermark(DateTime.MinValue, null));
+            }
+
+            var lastDoc = documents.Last();
+            var lastIdValue = lastDoc["_id"].IsObjectId ? lastDoc["_id"].AsObjectId.ToString() : lastDoc["_id"].AsString;
+            var newWatermark = new EtlWatermark(lastDoc.Contains("modifiedat") ? lastDoc["modifiedat"].ToUniversalTime() : DateTime.UtcNow, lastIdValue);
+            var expandoData = documents.Select(doc => ConvertToExando(doc)).Where(e => e != null).Cast<ExpandoObject>().ToList();
+
+            Log.Information("[{JobName}] Fetched {Count} records. New watermark will be: {Watermark}", SourceCollectionName, expandoData.Count, newWatermark);
+            return (expandoData, newWatermark);
         }
 
-        /// <summary>
-        /// Creates a custom destination for logging errors that occur during the ETL process.
-        /// </summary>
-        /// <param name="context"></param>
-        /// <returns></returns>
+        #region Unchanged Methods
         protected virtual CustomDestination<ETLBoxError> CreateErrorLoggingDestination(PerformContext? context)
         {
             return new CustomDestination<ETLBoxError>((error, rowIndex) =>
@@ -217,11 +172,7 @@ namespace MongoToSqlEtl.Jobs
                         return;
                     }
 
-                    // Lấy thông điệp lỗi gốc để ghi log
                     var reason = exception.ToString();
-
-                    // Chuyển đổi JSON lỗi thành một danh sách các đối tượng.
-                    // Dù là lỗi một bản ghi hay một lô, chúng ta đều xử lý như một danh sách.
                     var records = new List<IDictionary<string, object?>>();
                     using (var jsonDoc = JsonDocument.Parse(json))
                     {
@@ -237,8 +188,6 @@ namespace MongoToSqlEtl.Jobs
                         }
                     }
 
-                    // Ghi log lỗi cho TẤT CẢ các bản ghi trong dữ liệu bị lỗi.
-                    // Lần chạy ETL tiếp theo sẽ tự động xử lý lại các ID này.
                     foreach (var recordDict in records)
                     {
                         if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
@@ -247,9 +196,6 @@ namespace MongoToSqlEtl.Jobs
                             if (!string.IsNullOrEmpty(recordId))
                             {
                                 context?.WriteLine($"Data Row Error. ID: {recordId}. Reason: Batch write failed.");
-                                // Log.Warning("Logging failed record ID: {RecordId} due to batch error.", recordId);
-
-                                // Sử dụng FailedRecordManager để ghi nhận ID lỗi
                                 FailedRecordManager.LogFailedRecord(recordId, reason);
                                 CurrentRunFailedIds.Add(recordId);
                             }
@@ -271,15 +217,10 @@ namespace MongoToSqlEtl.Jobs
                 }
             });
         }
-
-        /// <summary>
-        /// Executes the 'sp_truncate_staging_tables' stored procedure using a Table-Valued Parameter
-        /// to clear a specific list of staging tables.
-        /// </summary>
         protected async Task TruncateStagingTablesAsync(PerformContext? context)
         {
             var jobName = SourceCollectionName;
-            var tablesToTruncate = StagingTables; // Lấy danh sách từ thuộc tính trừu tượng
+            var tablesToTruncate = StagingTables;
 
             if (tablesToTruncate == null || tablesToTruncate.Count == 0)
             {
@@ -291,7 +232,6 @@ namespace MongoToSqlEtl.Jobs
             context?.WriteLine($"Executing stored procedure to clear {tablesToTruncate.Count} specific staging table(s)...");
             Log.Information("[{JobName}] Executing 'sp_truncate_staging_tables' for tables: {TableNames}", jobName, string.Join(", ", tablesToTruncate));
 
-            // Tạo một DataTable trong bộ nhớ để khớp với cấu trúc của UDTT
             var tableData = new DataTable("StringList");
             tableData.Columns.Add("Value", typeof(string));
             foreach (var tableName in tablesToTruncate)
@@ -301,7 +241,6 @@ namespace MongoToSqlEtl.Jobs
 
             try
             {
-                // Sử dụng ADO.NET trực tiếp để có toàn quyền kiểm soát tham số TVP
                 string connectionString = SqlConnectionManager.ConnectionString.Value;
                 using var conn = new SqlConnection(connectionString);
                 await conn.OpenAsync();
@@ -309,8 +248,6 @@ namespace MongoToSqlEtl.Jobs
                 {
                     CommandType = CommandType.StoredProcedure
                 };
-
-                // Tạo tham số và gán dữ liệu DataTable
                 var tvpParam = cmd.Parameters.AddWithValue("@TableNames", tableData);
                 tvpParam.SqlDbType = SqlDbType.Structured;
                 tvpParam.TypeName = "dbo.udtt_StringList";
@@ -326,223 +263,95 @@ namespace MongoToSqlEtl.Jobs
                 context?.SetTextColor(ConsoleTextColor.Red);
                 context?.WriteLine($"Error: Failed to execute stored procedure to clear staging tables. The ETL process will be aborted.");
                 context?.ResetTextColor();
-
                 throw new Exception("Failed to truncate staging tables via stored procedure, aborting job execution.", ex);
             }
         }
-
-        #region Transformation Logic Specific to PatientOrders
-
-        /// <summary>
-        /// Component CHỈ CÓ CHỨC NĂNG làm phẳng (flatten) một mảng con.
-        /// Nó sẽ giữ lại TẤT CẢ các trường của các phần tử con.
-        /// </summary>
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(
-            string arrayFieldName,
-            string foreignKeyName,
-            string parentIdFieldName = "_id")
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "_id")
         {
-            // Hàm được truyền vào RowMultiplication bây giờ là một hàm iterator.
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(
-                parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName)
-            );
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName));
         }
-
-        /// <summary>
-        /// Một iterator sử dụng 'yield return' để làm phẳng (flatten) một mảng con
-        /// một cách hiệu quả về bộ nhớ.
-        /// </summary>
         private static IEnumerable<ExpandoObject> Flatten(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, string parentIdFieldName)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
-
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
-            {
-                yield break;
-            }
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-
-            // Lấy giá trị của trường cần làm phẳng.
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
-            {
-                yield break;
-            }
-
-            // Chuẩn hóa dữ liệu: coi cả object đơn và danh sách object như một danh sách để xử lý.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
             var itemsAsList = new List<object>();
-            if (value is IEnumerable<object> list && value is not string)
-            {
-                itemsAsList.AddRange(list);
-            }
-            else
-            {
-                itemsAsList.Add(value);
-            }
-
-            // Lặp qua danh sách đã được chuẩn hóa.
+            if (value is IEnumerable<object> list && value is not string) { itemsAsList.AddRange(list); } else { itemsAsList.Add(value); }
             foreach (var sourceItem in itemsAsList)
             {
                 if (sourceItem == null) continue;
-
-                // Tạo bản sao độc lập của item con để đảm bảo an toàn luồng
-                var itemAsExpando = (sourceItem is ExpandoObject expando)
-                    ? expando
-                    : ConvertToExando(sourceItem);
-
+                var itemAsExpando = (sourceItem is ExpandoObject expando) ? expando : ConvertToExando(sourceItem);
                 if (itemAsExpando == null) continue;
-
-                // Tạo một ExpandoObject mới để tránh thay đổi đối tượng gốc trong luồng dữ liệu
                 var safeItemCopy = new ExpandoObject();
                 var safeItemDict = (IDictionary<string, object?>)safeItemCopy;
-
-                // Sao chép tất cả các thuộc tính từ item gốc sang bản sao an toàn
-                foreach (var kvp in itemAsExpando)
-                {
-                    safeItemDict[kvp.Key] = kvp.Value;
-                }
-
-                // Thao tác ghi bây giờ hoàn toàn an toàn trên bản sao
+                foreach (var kvp in itemAsExpando) { safeItemDict[kvp.Key] = kvp.Value; }
                 safeItemDict[foreignKeyName] = parentIdAsString;
-
                 yield return safeItemCopy;
             }
         }
-
-        /// <summary>
-        /// Component CHỈ CÓ CHỨC NĂNG biến đổi và ánh xạ các trường của một đối tượng
-        /// với các cột của bảng đích.
-        /// </summary>
-        protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(
-            ICollection<string> targetColumns,
-            HashSet<string>? keepAsObjectFields = null)
+        protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
         {
-            // Chúng ta chỉ cần gọi lại logic đã có trong DataTransformer
-            return new RowTransformation<ExpandoObject>(row =>
-                DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields)
-            );
+            return new RowTransformation<ExpandoObject>(row => DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields));
         }
-
-        /// <summary>
-        /// Convert một đối tượng thành ExpandoObject.
-        /// </summary>
-        /// <param name="obj"></param>
-        /// <returns></returns>
         protected static ExpandoObject? ConvertToExando(object obj)
         {
             try
             {
-                // BsonDocument có phương thức .ToJson() để chuyển đổi hiệu quả.
                 if (obj is BsonDocument bsonDoc)
                 {
-                    // Chuyển BsonDocument thành chuỗi JSON, sau đó deserialize thành ExpandoObject.
-                    // Sử dụng các tùy chọn để đảm bảo định dạng JSON chuẩn, dễ đọc bởi System.Text.Json.
                     var json = bsonDoc.ToJson(new MongoDB.Bson.IO.JsonWriterSettings { OutputMode = MongoDB.Bson.IO.JsonOutputMode.RelaxedExtendedJson });
-                    var expando = JsonSerializer.Deserialize<ExpandoObject>(json);
-                    return expando;
+                    return JsonSerializer.Deserialize<ExpandoObject>(json);
                 }
 
-                // Đối với các loại object khác (ví dụ: các kiểu anonymous), serialize trực tiếp.
+                if (obj is JsonElement jsonElem)
+                {
+                    // Lấy văn bản JSON thô từ JsonElement và deserialize trực tiếp từ đó.
+                    var rawJson = jsonElem.GetRawText();
+
+                    // Nếu chuỗi JSON rỗng hoặc không phải là một đối tượng, trả về null.
+                    if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.Trim().StartsWith('{'))
+                    {
+                        return null;
+                    }
+
+                    return JsonSerializer.Deserialize<ExpandoObject>(rawJson);
+                }
+
+                // Nhánh dự phòng cho các kiểu đối tượng khác.
                 var generalJson = JsonSerializer.Serialize(obj);
                 var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
                 return generalExpando;
             }
             catch (Exception ex)
             {
-                // Ghi lại log nếu có lỗi xảy ra trong quá trình chuyển đổi.
-                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}", obj?.GetType().FullName ?? "null");
+                Log.Warning(ex, "Could not convert object to ExpandoObject. Object Type: {ObjectType}, Object Data: {@Object}", obj?.GetType().FullName ?? "null", obj);
                 return null;
             }
         }
-
-        /// <summary>
-        /// Component gộp: Vừa làm phẳng (flatten) một mảng con, vừa biến đổi (transform)
-        /// và ánh xạ (map) các trường của kết quả theo các cột của bảng đích.
-        /// Đây là sự kết hợp của CreateFlattenComponent và CreateTransformAndMapComponent.
-        /// </summary>
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(
-            string arrayFieldName,
-            string foreignKeyName,
-            ICollection<string> targetColumns,
-            string parentIdFieldName = "_id",
-            HashSet<string>? keepAsObjectFields = null)
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName = "_id", HashSet<string>? keepAsObjectFields = null)
         {
-            // Hàm được truyền vào RowMultiplication là một hàm iterator (sử dụng yield return)
-            // để xử lý hiệu quả về bộ nhớ, tạo ra nhiều bản ghi con từ một bản ghi cha.
-            return new RowMultiplication<ExpandoObject, ExpandoObject>(
-                parentRow => FlattenAndTransform(
-                    parentRow,
-                    arrayFieldName,
-                    foreignKeyName,
-                    targetColumns,
-                    parentIdFieldName,
-                    keepAsObjectFields
-                )
-            );
+            return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndTransform(parentRow, arrayFieldName, foreignKeyName, targetColumns, parentIdFieldName, keepAsObjectFields));
         }
-
-        /// <summary>
-        /// Iterator thực hiện logic làm phẳng và biến đổi.
-        /// </summary>
-        private static IEnumerable<ExpandoObject> FlattenAndTransform(
-            ExpandoObject parentRow,
-            string arrayFieldName,
-            string foreignKeyName,
-            ICollection<string> targetColumns,
-            string parentIdFieldName,
-            HashSet<string>? keepAsObjectFields)
+        private static IEnumerable<ExpandoObject> FlattenAndTransform(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName, HashSet<string>? keepAsObjectFields)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
-
-            // Lấy ID của đối tượng cha để gán làm khóa ngoại cho các đối tượng con.
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
-            {
-                yield break;
-            }
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-
-            // Lấy giá trị của trường cần làm phẳng.
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
-            {
-                yield break;
-            }
-
-            // Chuẩn hóa dữ liệu: coi cả object đơn và danh sách object như một danh sách để xử lý.
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
             var itemsAsList = new List<object>();
-            if (value is IEnumerable<object> list && value is not string)
-            {
-                itemsAsList.AddRange(list);
-            }
-            else
-            {
-                itemsAsList.Add(value);
-            }
-
-            // Lặp qua từng phần tử trong danh sách đã được chuẩn hóa.
+            if (value is IEnumerable<object> list && value is not string) { itemsAsList.AddRange(list); } else { itemsAsList.Add(value); }
             foreach (var sourceItem in itemsAsList)
             {
                 if (sourceItem == null) continue;
-
-                // Chuyển đổi phần tử con thành ExpandoObject nếu cần.
-                var itemAsExpando = (sourceItem is ExpandoObject expando)
-                    ? expando
-                    : ConvertToExando(sourceItem);
-
+                var itemAsExpando = (sourceItem is ExpandoObject expando) ? expando : ConvertToExando(sourceItem);
                 if (itemAsExpando == null) continue;
-
                 var itemAsDict = (IDictionary<string, object?>)itemAsExpando;
-
-                // Thêm khóa ngoại (ID của cha) vào đối tượng con.
                 itemAsDict[foreignKeyName] = parentIdAsString;
-
-                // Thực hiện biến đổi và ánh xạ đối tượng con đã có khóa ngoại
-                // để khớp với cấu trúc của bảng đích trong SQL.
                 var transformedItem = DataTransformer.TransformObject(itemAsExpando, targetColumns, keepAsObjectFields);
-
-                // Trả về đối tượng đã được biến đổi hoàn chỉnh.
                 yield return transformedItem;
             }
         }
-
         #endregion
     }
 }

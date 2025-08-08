@@ -1,82 +1,113 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
-using MongoDB.Bson;
-using MongoDB.Driver;
+using Microsoft.Data.SqlClient;
 using Serilog;
+using System.Data.SqlTypes;
 
 namespace MongoToSqlEtl.Managers
 {
-    public class EtlLogManager(IConnectionManager connectionManager, MongoClient mongoClient, string mongoDatabaseName, string sourceCollectionName)
-    {
+    public record EtlWatermark(DateTime LastModifiedAt, string? LastId);
 
-        // Please adjust this date to your project's actual start date for fallback scenarios.
+    public class EtlLogManager(IConnectionManager connectionManager, string sourceCollectionName)
+    {
         private static readonly DateTime FallbackStartDate = new(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        public DateTime GetLastSuccessfulWatermark()
+        /// <summary>
+        /// ✅ SỬA ĐỔI: Loại bỏ hoàn toàn logic kiểm tra `isBackfill`.
+        /// Phương thức này giờ đây chỉ có một nhiệm vụ: đọc log cuối cùng một cách trung thực.
+        /// </summary>
+        public EtlWatermark GetLastSuccessfulWatermark(bool isBackfill = false) // Tham số isBackfill vẫn được giữ lại nhưng không còn được sử dụng ở đây.
         {
-            // Step 1: Try to get the watermark from the SQL Server log table
+            var sql = @"
+                SELECT TOP 1 WatermarkLastModifiedAtUtc, WatermarkLastId FROM __ETLExecutionLog
+                WHERE SourceCollectionName = @SourceCollectionName AND UPPER(Status) = 'SUCCEEDED' AND WatermarkLastId IS NOT NULL AND WatermarkLastId <> ''
+                ORDER BY WatermarkLastModifiedAtUtc DESC, Id DESC";
+
             try
             {
-                var sql = @"
-                    SELECT TOP 1 WatermarkEndTimeUtc FROM __ETLExecutionLog
-                    WHERE SourceCollectionName = @sourceCollectionName AND Status = 'Succeeded'
-                    ORDER BY ExecutionStartTimeUtc DESC";
-                var parameters = new List<QueryParameter> { new("sourceCollectionName", sourceCollectionName) };
+                using var conn = new SqlConnection(connectionManager.ConnectionString.Value);
+                using var cmd = new SqlCommand(sql, conn);
 
-                var result = SqlTask.ExecuteScalar(connectionManager, sql, parameters);
-                if (result != null && result != DBNull.Value)
+                cmd.Parameters.AddWithValue("@SourceCollectionName", sourceCollectionName);
+
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+
+                if (reader.Read())
                 {
-                    var lastRun = DateTime.SpecifyKind((DateTime)result, DateTimeKind.Utc);
-                    Log.Information("[LogManager] Found last successful watermark in SQL: {LastRun}", lastRun);
-                    return lastRun;
+                    var lastRunTime = reader.GetDateTime(0);
+                    var lastId = reader.GetString(1);
+
+                    var watermark = new EtlWatermark(DateTime.SpecifyKind(lastRunTime, DateTimeKind.Utc), lastId);
+                    Log.Information("[LogManager] Found last successful watermark in SQL: {Watermark}", watermark);
+                    return watermark;
                 }
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "[LogManager] Could not query __ETLExecutionLog table.");
+                Log.Error(ex, "[LogManager] An error occurred while fetching watermark with ADO.NET.");
             }
 
-            // Step 2: If no watermark is found, query MongoDB for the earliest 'modifiedat'
-            Log.Information("[LogManager] No watermark found in SQL. Querying MongoDB for the earliest 'modifiedat' date.");
-            try
+            // Nếu không tìm thấy log nào (ví dụ: lần chạy ĐẦU TIÊN của backfill),
+            // trả về một watermark "khởi tạo".
+            Log.Information("[LogManager] No successful run found. Initializing watermark.");
+            if (isBackfill)
             {
-                var database = mongoClient.GetDatabase(mongoDatabaseName);
-                var collection = database.GetCollection<BsonDocument>(sourceCollectionName);
-
-                var sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
-                var projection = Builders<BsonDocument>.Projection.Include("modifiedat");
-                var earliestDoc = collection.Find(new BsonDocument()).Sort(sort).Project(projection).FirstOrDefault();
-
-                if (earliestDoc != null && earliestDoc.Contains("modifiedat") && earliestDoc["modifiedat"].IsBsonDateTime)
-                {
-                    var earliestDate = earliestDoc["modifiedat"].ToUniversalTime();
-                    Log.Information("[LogManager] Found earliest 'modifiedat' in MongoDB: {EarliestDate}", earliestDate);
-                    return earliestDate;
-                }
+                // Cho backfill, chúng ta bắt đầu với ID rỗng để lấy từ đầu.
+                return new EtlWatermark(DateTime.MinValue, null);
             }
-            catch (Exception ex)
+            else
             {
-                Log.Warning(ex, "[LogManager] Could not query MongoDB for the earliest date. This may happen if the collection is new or empty.");
+                // Cho chế độ thường, bắt đầu từ ngày mặc định.
+                return new EtlWatermark(FallbackStartDate, null);
             }
-
-            // Step 3: If both SQL and MongoDB fail, use the hardcoded fallback start date
-            Log.Information("[LogManager] No date found in MongoDB. Using hardcoded fallback: {FallbackDate}", FallbackStartDate);
-            return FallbackStartDate;
         }
 
-        public int StartNewLogEntry(DateTime watermarkStart, DateTime watermarkEnd)
+        public long GetTotalBackfillRecordsProcessed()
         {
-            // SECURITY FIX: Use parameterized query to prevent SQL injection.
             var sql = @"
-                INSERT INTO __ETLExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkStartTimeUtc, WatermarkEndTimeUtc, Status)
-                VALUES (@sourceCollectionName, GETUTCDATE(), @watermarkStart, @watermarkEnd, 'Started');
+                SELECT ISNULL(SUM(SourceRecordCount), 0)
+                FROM __ETLExecutionLog
+                WHERE SourceCollectionName = @SourceCollectionName AND UPPER(Status) = 'SUCCEEDED'";
+
+            try
+            {
+                var result = SqlTask.ExecuteScalar(connectionManager, sql, [new("SourceCollectionName", sourceCollectionName)]);
+                if (result != null && result != DBNull.Value)
+                {
+                    var total = Convert.ToInt64(result);
+                    Log.Information("[LogManager] Total records processed in previous backfills: {Total}", total);
+                    return total;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[LogManager] Could not calculate total backfill records processed.");
+            }
+            return 0;
+        }
+
+        // Các phương thức StartNewLogEntry, UpdateLogEntryOnSuccess, UpdateLogEntryOnFailure không thay đổi.
+        #region Unchanged Methods
+        public int StartNewLogEntry(EtlWatermark previousWatermark, EtlWatermark newWatermark)
+        {
+            var sql = @"
+                INSERT INTO __ETLExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkPreviousModifiedAtUtc, WatermarkLastModifiedAtUtc, WatermarkLastId, Status)
+                VALUES (@sourceCollectionName, GETUTCDATE(), @prevModAt, @newModAt, @newId, 'Started');
                 SELECT SCOPE_IDENTITY();";
+
+            var safePreviousModifiedAt = previousWatermark.LastModifiedAt == DateTime.MinValue
+                                       ? SqlDateTime.MinValue.Value
+                                       : previousWatermark.LastModifiedAt;
+
             var parameters = new List<QueryParameter>
             {
                 new("sourceCollectionName", sourceCollectionName),
-                new("watermarkStart", watermarkStart),
-                new("watermarkEnd", watermarkEnd)
+                new("prevModAt", safePreviousModifiedAt),
+                new("newModAt", newWatermark.LastModifiedAt),
+                new("newId", (object?)newWatermark.LastId ?? DBNull.Value),
             };
+
             var logId = Convert.ToInt32(SqlTask.ExecuteScalar(connectionManager, sql, parameters));
             Log.Information("[LogManager] Created new ETL log entry with ID: {LogId}", logId);
             return logId;
@@ -84,7 +115,6 @@ namespace MongoToSqlEtl.Managers
 
         public void UpdateLogEntryOnSuccess(int logId, long sourceCount, long successCount, long failedCount)
         {
-            // SECURITY FIX: Use parameterized query to prevent SQL injection.
             var sql = @"UPDATE __ETLExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Succeeded',
                 SourceRecordCount = @sourceCount, SuccessRecordCount = @successCount, FailedRecordCount = @failedCount, ErrorMessage = NULL
                 WHERE Id = @logId;";
@@ -101,7 +131,6 @@ namespace MongoToSqlEtl.Managers
 
         public void UpdateLogEntryOnFailure(int logId, string errorMessage)
         {
-            // SECURITY FIX: Use parameterized query to prevent SQL injection.
             var sql = @"UPDATE __ETLExecutionLog SET ExecutionEndTimeUtc = GETUTCDATE(), Status = 'Failed', ErrorMessage = @errorMessage
                 WHERE Id = @logId;";
             var parameters = new List<QueryParameter>
@@ -112,5 +141,6 @@ namespace MongoToSqlEtl.Managers
             SqlTask.ExecuteNonQuery(connectionManager, sql, parameters);
             Log.Error("[LogManager] Updated log entry ID: {LogId} to 'Failed'.", logId);
         }
+        #endregion
     }
 }

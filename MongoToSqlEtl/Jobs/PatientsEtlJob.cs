@@ -22,14 +22,14 @@ namespace MongoToSqlEtl.Jobs
 
         protected override List<string> StagingTables => [];
 
-        public new async Task RunAsync(PerformContext? context, int maxBatchIntervalInMinutes)
+        public new async Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
-            context?.WriteLine("Starting job execution...");
-            await base.RunAsync(context, maxBatchIntervalInMinutes);
-            context?.WriteLine("Job execution completed.");
+            context?.WriteLine("Starting job execution for PatientOrders...");
+            await base.RunAsync(context, jobSettings);
+            context?.WriteLine("Job execution for PatientOrders completed.");
         }
 
-        protected override EtlPipeline BuildPipeline(DateTime startDate, DateTime endDate, List<string> failedIds, PerformContext? context)
+        protected override EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context)
         {
             // 1. Định nghĩa các bảng
             var patientsDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientTable);
@@ -37,7 +37,7 @@ namespace MongoToSqlEtl.Jobs
             var patientscontactDef = TableDefinition.FromTableName(SqlConnectionManager, DestPatientContactTable);
 
             // 2. Các component nguồn và lỗi
-            var source = CreateMongoDbSource(startDate, endDate, failedIds);
+            var source = new MemorySource<ExpandoObject>(batchData);
             var logErrors = CreateErrorLoggingDestination(context);
 
             // 3. Multicast cấp 1 cho 'patients'
@@ -66,7 +66,7 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientsaddressDef.Columns.Select(c => c.Name)]
             );
-            
+
             // var destPatientsAddress = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable);
 
             var destPatientsAddress = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable)
@@ -86,7 +86,7 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientscontactDef.Columns.Select(c => c.Name)]
             );
-            
+
             // var destPatientsContact = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientContactTable);
 
             var destPatientsContact = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientContactTable)
