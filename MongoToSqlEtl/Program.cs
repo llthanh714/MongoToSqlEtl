@@ -67,6 +67,7 @@ try
 
     builder.Services.AddTransient<PatientsEtlJob>();
     builder.Services.AddTransient<ReferenceValues>();
+    builder.Services.AddTransient<OrderItemsEtlJob>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
