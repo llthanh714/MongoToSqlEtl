@@ -107,42 +107,100 @@ namespace MongoToSqlEtl.Jobs
         protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, bool isBackfill)
         {
             var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
-            var filterBuilder = Builders<BsonDocument>.Filter;
-            FilterDefinition<BsonDocument> filter;
-            SortDefinition<BsonDocument> sort;
+            var allData = new List<ExpandoObject>();
+            var documentMap = new Dictionary<string, BsonDocument>();
 
-            if (isBackfill)
+            // 1. Ưu tiên lấy các bản ghi bị lỗi đang chờ xử lý lại
+            var pendingFailedIds = FailedRecordManager.GetPendingFailedRecordIds();
+            if (pendingFailedIds.Count != 0)
             {
-                Log.Information("[{JobName}] Running in Backfill mode using skip/limit. Skipping: {Skip}, Taking: {Take}", SourceCollectionName, recordsToSkip, batchSize);
-                filter = filterBuilder.Empty; // No filter needed
-                sort = Builders<BsonDocument>.Sort.Ascending("_id"); // Still sort for consistent order
-            }
-            else
-            {
-                var lastWatermark = LogManager.GetLastSuccessfulWatermark();
-                Log.Information("[{JobName}] Running in Normal mode. Filtering by modifiedat > {Date}", SourceCollectionName, lastWatermark.LastModifiedAt);
-                filter = filterBuilder.Gt("modifiedat", lastWatermark.LastModifiedAt);
-                sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
+                Log.Information("[{JobName}] Found {Count} pending records to retry. Fetching their full data.", SourceCollectionName, pendingFailedIds.Count);
+                var retryFilter = Builders<BsonDocument>.Filter.In("_id", pendingFailedIds.Select(id => new ObjectId(id)));
+                var failedDocs = await collection.Find(retryFilter).ToListAsync();
+
+                foreach (var doc in failedDocs)
+                {
+                    var idString = doc["_id"].AsObjectId.ToString();
+                    documentMap.TryAdd(idString, doc);
+                }
             }
 
-            var findQuery = collection.Find(filter).Sort(sort);
-            if (isBackfill)
+            // 2. Lấy dữ liệu mới nếu vẫn còn chỗ trong batch
+            var remainingBatchSize = batchSize - documentMap.Count;
+            if (remainingBatchSize > 0)
             {
-                findQuery = findQuery.Skip((int)recordsToSkip);
-            }
-            var documents = await findQuery.Limit(batchSize).ToListAsync();
+                var filterBuilder = Builders<BsonDocument>.Filter;
+                FilterDefinition<BsonDocument> filter;
+                SortDefinition<BsonDocument> sort;
 
-            if (documents.Count == 0)
+                if (isBackfill)
+                {
+                    Log.Information("[{JobName}] Running in Backfill mode. Skipping: {Skip}, Taking: {Take}", SourceCollectionName, recordsToSkip, remainingBatchSize);
+                    filter = filterBuilder.Empty;
+                    sort = Builders<BsonDocument>.Sort.Ascending("_id");
+                }
+                else
+                {
+                    var lastWatermark = LogManager.GetLastSuccessfulWatermark();
+                    Log.Information("[{JobName}] Running in Normal mode. Filtering by modifiedat > {Date}", SourceCollectionName, lastWatermark.LastModifiedAt);
+                    filter = filterBuilder.Gt("modifiedat", lastWatermark.LastModifiedAt);
+                    sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
+                }
+
+                var findQuery = collection.Find(filter).Sort(sort);
+                if (isBackfill)
+                {
+                    findQuery = findQuery.Skip((int)recordsToSkip);
+                }
+                var newDocuments = await findQuery.Limit(remainingBatchSize).ToListAsync();
+
+                foreach (var doc in newDocuments)
+                {
+                    var idString = doc["_id"].IsObjectId ? doc["_id"].AsObjectId.ToString() : doc["_id"].AsString;
+                    // Tránh thêm trùng lặp nếu một bản ghi vừa lỗi vừa nằm trong batch mới
+                    documentMap.TryAdd(idString, doc);
+                }
+            }
+
+
+            if (documentMap.Count == 0)
             {
                 return ([], new EtlWatermark(DateTime.MinValue, null));
             }
 
+            var documents = documentMap.Values.ToList();
+
+            // Sắp xếp lại để đảm bảo thứ tự xử lý nhất quán (quan trọng cho watermark)
+            documents.Sort((a, b) =>
+            {
+                // Lấy ra giá trị để so sánh từ mỗi document. Ưu tiên 'modifiedat'.
+                var valA = a.Contains("modifiedat") ? a["modifiedat"] : a["_id"];
+                var valB = b.Contains("modifiedat") ? b["modifiedat"] : b["_id"];
+
+                // Nếu cả hai giá trị cùng loại, hãy so sánh chúng trực tiếp.
+                if (valA.BsonType == valB.BsonType)
+                {
+                    return valA.CompareTo(valB);
+                }
+
+                // Nếu chúng khác loại, quy ước rằng BsonDateTime (ngày tháng) luôn "lớn hơn" BsonObjectId (ID).
+                // Điều này đảm bảo các document có 'modifiedat' sẽ được xếp sau, là điều chúng ta muốn để lấy watermark.
+                return valA.BsonType == BsonType.DateTime ? 1 : -1;
+            });
+
             var lastDoc = documents.Last();
             var lastIdValue = lastDoc["_id"].IsObjectId ? lastDoc["_id"].AsObjectId.ToString() : lastDoc["_id"].AsString;
             var newWatermark = new EtlWatermark(lastDoc.Contains("modifiedat") ? lastDoc["modifiedat"].ToUniversalTime() : DateTime.UtcNow, lastIdValue);
+
             var expandoData = documents.Select(doc => ConvertToExando(doc)).Where(e => e != null).Cast<ExpandoObject>().ToList();
 
-            Log.Information("[{JobName}] Fetched {Count} records. New watermark will be: {Watermark}", SourceCollectionName, expandoData.Count, newWatermark);
+            // Đánh dấu các bản ghi được retry là đã được xử lý (để tránh lặp lại mãi mãi)
+            if (pendingFailedIds.Count != 0)
+            {
+                FailedRecordManager.MarkRecordsAsResolved(pendingFailedIds);
+            }
+
+            Log.Information("[{JobName}] Fetched {Count} records ({RetryCount} retries, {NewCount} new). New watermark: {Watermark}", SourceCollectionName, expandoData.Count, pendingFailedIds.Count, documents.Count - pendingFailedIds.Count, newWatermark);
             return (expandoData, newWatermark);
         }
 
