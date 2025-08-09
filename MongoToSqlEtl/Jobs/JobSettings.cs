@@ -1,6 +1,39 @@
 ﻿namespace MongoToSqlEtl.Jobs
 {
     /// <summary>
+    /// Định nghĩa ánh xạ từ một trường trong MongoDB (có thể là document gốc hoặc một mảng con) tới một bảng trong SQL.
+    /// </summary>
+    public class TableMapping
+    {
+        /// <summary>
+        /// Tên trường trong document MongoDB. Đối với document gốc, có thể để trống hoặc dùng một tên đại diện.
+        /// </gsummary>
+        public string MongoFieldName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Tên bảng SQL đích.
+        /// </summary>
+        public string SqlTableName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Tên trường của đối tượng cha chứa mảng này. Null hoặc rỗng cho document gốc (bảng cha).
+        /// Ví dụ: "patientorderitems" nằm trong document gốc, nên trường này là null. "dispensebatchdetail" nằm trong "patientorderitems", nên trường này là "patientorderitems".
+        /// </summary>
+        public string? ParentMongoFieldName { get; set; }
+
+        /// <summary>
+        /// Tên cột khóa ngoại trong bảng SQL đích để liên kết với bảng cha.
+        /// </summary>
+        public string ForeignKeyName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Trường trong đối tượng cha được sử dụng làm giá trị cho khóa ngoại. Mặc định là "_id".
+        /// </summary>
+        public string ParentIdSourceField { get; set; } = "_id";
+    }
+
+
+    /// <summary>
     /// Đại diện cho cấu hình của một recurring job trong file appsettings.json.
     /// </summary>
     public class JobSettings
@@ -41,6 +74,16 @@
         /// Cấu hình cho việc chạy backfill (lấy lại dữ liệu lịch sử).
         /// </summary>
         public BackfillSettings Backfill { get; set; } = new();
+
+        /// <summary>
+        /// (MỚI) Định nghĩa các ánh xạ từ MongoDB sang SQL để job tự động xây dựng pipeline.
+        /// </summary>
+        public List<TableMapping> Mappings { get; set; } = [];
+
+        /// <summary>
+        /// (MỚI) Tên của Stored Procedure (tùy chọn) để thực thi sau khi tải dữ liệu vào các bảng staging.
+        /// </summary>
+        public string? MergeStoredProcedure { get; set; }
     }
 
     /// <summary>

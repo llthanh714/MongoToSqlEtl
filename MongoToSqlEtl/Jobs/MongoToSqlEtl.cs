@@ -18,27 +18,25 @@ using System.Text.Json;
 
 namespace MongoToSqlEtl.Jobs
 {
-    public abstract class EtlJob
+    public abstract class EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
     {
-        protected readonly IConnectionManager SqlConnectionManager;
-        protected readonly MongoClient MongoClient;
-        protected readonly INotificationService NotificationService;
-        protected readonly EtlLogManager LogManager;
-        protected readonly EtlFailedRecordManager FailedRecordManager;
+        protected readonly IConnectionManager SqlConnectionManager = sqlConnectionManager;
+        protected readonly MongoClient MongoClient = mongoClient;
+        protected readonly INotificationService NotificationService = notificationService;
+
+        // Sửa đổi: Khởi tạo với `null!` để báo cho compiler rằng chúng sẽ được gán giá trị trước khi sử dụng.
+        protected EtlLogManager LogManager = null!;
+        protected EtlFailedRecordManager FailedRecordManager = null!;
 
         protected ConcurrentBag<string> CurrentRunFailedIds { get; private set; } = [];
         protected abstract List<string> StagingTables { get; }
+
+        // Sửa đổi: Giữ lại thuộc tính này, nó sẽ hoạt động đúng sau khi tái cấu trúc.
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
 
-        protected EtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService)
-        {
-            SqlConnectionManager = sqlConnectionManager;
-            MongoClient = mongoClient;
-            NotificationService = notificationService;
-            LogManager = new EtlLogManager(sqlConnectionManager, SourceCollectionName);
-            FailedRecordManager = new EtlFailedRecordManager(sqlConnectionManager, SourceCollectionName);
-        }
+        // Mới: Phương thức trừu tượng để lớp con lưu lại job settings.
+        protected abstract void SetJobSettings(JobSettings jobSettings);
 
         protected abstract EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context);
 
@@ -48,12 +46,22 @@ namespace MongoToSqlEtl.Jobs
             int logId = 0;
             try
             {
+                // Bước 1: Cho phép lớp con thiết lập trạng thái nội bộ của nó. Đây là bước quan trọng nhất.
+                SetJobSettings(jobSettings);
+
+                // Bước 2: Bây giờ SourceCollectionName đã có thể truy cập an toàn.
+                // Khởi tạo các manager ở đây.
+                LogManager = new EtlLogManager(SqlConnectionManager, SourceCollectionName);
+                FailedRecordManager = new EtlFailedRecordManager(SqlConnectionManager, SourceCollectionName);
+
+                // Các logic còn lại của RunAsync giữ nguyên...
                 long recordsToSkip = 0;
                 if (jobSettings.Backfill.Enabled)
                 {
                     recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
                 }
 
+                // ... (phần còn lại của phương thức không thay đổi)
                 var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings.Backfill.Enabled);
 
                 if (batchData.Count == 0)
@@ -95,7 +103,7 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine($"Job '{SourceCollectionName}' has failed with a critical error.");
                 context?.WriteLine(ex.ToString());
                 context?.ResetTextColor();
-                if (logId > 0)
+                if (logId > 0 && LogManager != null) // Thêm kiểm tra null để an toàn
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
                     await NotificationService.SendFatalErrorAsync(SourceCollectionName, ex);

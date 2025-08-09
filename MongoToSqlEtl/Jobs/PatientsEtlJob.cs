@@ -1,7 +1,6 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
-using Hangfire.Console;
 using Hangfire.Server;
 using MongoDB.Driver;
 using MongoToSqlEtl.Services;
@@ -14,21 +13,29 @@ namespace MongoToSqlEtl.Jobs
     /// </summary>
     public class PatientsEtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService) : EtlJob(sqlConnectionManager, mongoClient, notificationService)
     {
+        // Các thuộc tính này không thay đổi
         protected override string SourceCollectionName => "patients";
         protected override string MongoDatabaseName => "arcusairdb";
         private const string DestPatientTable = "patients";
         private const string DestPatientAddressTable = "patientsaddress";
         private const string DestPatientContactTable = "patientscontact";
-
         protected override List<string> StagingTables => [];
 
-        public new async Task RunAsync(PerformContext? context, JobSettings jobSettings)
+        // ✅ THAY ĐỔI 1: Chuẩn hóa lại phương thức RunAsync
+        // Chỉ cần gọi phương thức của lớp cha. Lớp cha sẽ xử lý việc ghi log và gọi SetJobSettings.
+        public new Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
-            context?.WriteLine("Starting job execution for PatientOrders...");
-            await base.RunAsync(context, jobSettings);
-            context?.WriteLine("Job execution for PatientOrders completed.");
+            return base.RunAsync(context, jobSettings);
         }
 
+        // ✅ THAY ĐỔI 2: Triển khai phương thức trừu tượng mới
+        // Vì job này không dùng settings để xây dựng pipeline, chúng ta chỉ cần một triển khai rỗng.
+        protected override void SetJobSettings(JobSettings jobSettings)
+        {
+            // Không cần làm gì ở đây cho các job có logic cố định.
+        }
+
+        // Phương thức BuildPipeline không thay đổi
         protected override EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context)
         {
             // 1. Định nghĩa các bảng
@@ -47,14 +54,11 @@ namespace MongoToSqlEtl.Jobs
 
             // ================== FLOW 1: patients ==================
             var transformAndMapPatients = CreateTransformAndMapComponent([.. patientsDef.Columns.Select(c => c.Name)]);
-            // var destPatients = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientTable);
-
             var destPatients = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientTable)
             {
                 MergeMode = MergeMode.Delta,
                 IdColumns = [new IdColumn { IdPropertyName = "_id" }]
             };
-
             multicastPatients.LinkTo(transformAndMapPatients);
             transformAndMapPatients.LinkTo(destPatients);
             transformAndMapPatients.LinkErrorTo(logErrors);
@@ -66,15 +70,11 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientsaddressDef.Columns.Select(c => c.Name)]
             );
-
-            // var destPatientsAddress = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable);
-
             var destPatientsAddress = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable)
             {
                 MergeMode = MergeMode.Delta,
                 IdColumns = [new IdColumn { IdPropertyName = "_id" }]
             };
-
             multicastPatients.LinkTo(flattenAndTransformPatientsAddress, o => ((IDictionary<string, object?>)o).ContainsKey("address"));
             flattenAndTransformPatientsAddress.LinkTo(destPatientsAddress);
             flattenAndTransformPatientsAddress.LinkErrorTo(logErrors);
@@ -86,27 +86,22 @@ namespace MongoToSqlEtl.Jobs
                 foreignKeyName: "patientsuid",
                 targetColumns: [.. patientscontactDef.Columns.Select(c => c.Name)]
             );
-
-            // var destPatientsContact = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientContactTable);
-
             var destPatientsContact = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientContactTable)
             {
                 MergeMode = MergeMode.Delta,
                 IdColumns = [new IdColumn { IdPropertyName = "_id" }]
             };
-
             multicastPatients.LinkTo(flattenAndTransformPatientsContact, o => ((IDictionary<string, object?>)o).ContainsKey("contact"));
             flattenAndTransformPatientsContact.LinkTo(destPatientsContact);
             flattenAndTransformPatientsContact.LinkErrorTo(logErrors);
             destPatientsContact.LinkErrorTo(logErrors);
-
 
             // 4. Trả về pipeline
             return new EtlPipeline(
                 Source: source,
                 Destinations: [destPatients, destPatientsAddress, destPatientsContact],
                 ErrorDestination: logErrors,
-                SqlStoredProcedureName: string.Empty // Không sử dụng stored procedure
+                SqlStoredProcedureName: string.Empty
             );
         }
     }

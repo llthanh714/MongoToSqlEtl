@@ -1,7 +1,6 @@
 ﻿using ETLBox;
 using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
-using Hangfire.Console;
 using Hangfire.Server;
 using MongoDB.Driver;
 using MongoToSqlEtl.Services;
@@ -22,11 +21,14 @@ namespace MongoToSqlEtl.Jobs
 
         protected override List<string> StagingTables => [];
 
-        public new async Task RunAsync(PerformContext? context, JobSettings jobSettings)
+        public new Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
-            context?.WriteLine("Starting job execution for PatientOrders...");
-            await base.RunAsync(context, jobSettings);
-            context?.WriteLine("Job execution for PatientOrders completed.");
+            return base.RunAsync(context, jobSettings);
+        }
+
+        protected override void SetJobSettings(JobSettings jobSettings)
+        {
+            // Không cần làm gì ở đây cho các job có logic cố định.
         }
 
         protected override EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context)
