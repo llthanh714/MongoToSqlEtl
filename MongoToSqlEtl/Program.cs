@@ -67,6 +67,7 @@ try
     });
 
     builder.Services.AddSingleton<IJobConfigurationService, JobConfigurationService>();
+    builder.Services.AddTransient<JobReloaderJob>();
     builder.Services.AddTransient<ConfigurableEtlJob>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
@@ -198,6 +199,20 @@ try
         else
         {
             Log.Information("No enabled jobs found in the database to register.");
+        }
+
+        try
+        {
+            RecurringJob.AddOrUpdate<JobReloaderJob>(
+                "System: Reload All Jobs",
+                job => job.ReloadAllJobs(),
+                Cron.Never()
+            );
+            Log.Information("Successfully registered the manual 'Reload All Jobs' trigger.");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to register the manual 'Reload All Jobs' trigger.");
         }
     }
 
