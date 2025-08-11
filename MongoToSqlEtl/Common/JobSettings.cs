@@ -1,4 +1,4 @@
-﻿namespace MongoToSqlEtl.Jobs
+﻿namespace MongoToSqlEtl.Common
 {
     /// <summary>
     /// Định nghĩa ánh xạ từ một trường trong MongoDB (có thể là document gốc hoặc một mảng con) tới một bảng trong SQL.

@@ -8,6 +8,7 @@ using Hangfire.Server;
 using Hangfire.SqlServer;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using MongoDB.Driver;
+using MongoToSqlEtl.Common;
 using MongoToSqlEtl.Jobs;
 using MongoToSqlEtl.Services;
 using Serilog;

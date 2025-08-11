@@ -3,10 +3,12 @@ using ETLBox.ControlFlow;
 using ETLBox.DataFlow;
 using Hangfire.Server;
 using MongoDB.Driver;
+using MongoToSqlEtl.Common;
+using MongoToSqlEtl.Jobs;
 using MongoToSqlEtl.Services;
 using System.Dynamic;
 
-namespace MongoToSqlEtl.Jobs
+namespace MongoToSqlEtl.StoredJobs
 {
     /// <summary>
     /// Lớp triển khai cụ thể cho việc ETL collection 'patients'.
