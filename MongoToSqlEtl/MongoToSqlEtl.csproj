@@ -8,13 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="Models\**" />
-    <Content Remove="Models\**" />
-    <EmbeddedResource Remove="Models\**" />
-    <None Remove="Models\**" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.66" />
     <PackageReference Include="ETLBox" Version="3.7.1" />
     <PackageReference Include="ETLBox.Logging" Version="3.7.1" />
     <PackageReference Include="ETLBox.MongoDb" Version="3.7.1" />

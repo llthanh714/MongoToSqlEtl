@@ -24,7 +24,7 @@ Log.Logger = new LoggerConfiguration()
         outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
-
+// The license key remains unchanged
 LicenseService.CurrentKey = "2025-09-22|TRIAL|ONLY FOR PERSONAL OR TESTING PURPOSES|CUSTOMER:Le Long Thanh|MAIL:llthanh714@gmail.com||jKQA+uo+BcY7ZHBXmKMyf6gdOIhhD34RepQHEMERQOdQ2Kj6t6nBLmyZnlh4K8UZmuUZBVxHraOnVrJwelVCjb2fko+Lj9vSXmydzkv1x9YFVK0L06Sm8CMntvMJREsvh97p3rdckV53TWhSH4muPPTdfwuAfjW4C7umRAdO3dE=";
 
 try
@@ -66,6 +66,7 @@ try
         return new SlackNotificationService(config["NotificationSettings:SlackWebhookUrl"]);
     });
 
+    builder.Services.AddSingleton<IJobConfigurationService, JobConfigurationService>();
     builder.Services.AddTransient<ConfigurableEtlJob>();
     builder.Services.AddTransient<PatientOrdersEtlJob>();
 
@@ -119,12 +120,14 @@ try
 
     var hangfireOptions = new DashboardOptions
     {
-        Authorization = [
+        Authorization =
+        [
             new BasicAuthAuthorizationFilter(new BasicAuthAuthorizationFilterOptions
             {
                 RequireSsl = true,
                 LoginCaseSensitive = true,
-                Users = [
+                Users =
+                [
                     new BasicAuthAuthorizationUser
                     {
                         Login = "admin",
@@ -137,58 +140,64 @@ try
 
     app.UseHangfireDashboard("/etl", hangfireOptions);
 
-    var recurringJobs = app.Services.GetRequiredService<IConfiguration>()
-                           .GetSection("RecurringJobs")
-                           .Get<List<JobSettings>>();
-
-    if (recurringJobs != null)
+    using (var serviceScope = app.Services.CreateScope())
     {
-        using var serviceScope = app.Services.CreateScope();
         var serviceProvider = serviceScope.ServiceProvider;
+        var jobConfigService = serviceProvider.GetRequiredService<IJobConfigurationService>();
 
-        foreach (var jobSetting in recurringJobs.Where(j => j.Enabled))
+        // Get the list of active jobs from the database
+        var recurringJobs = await jobConfigService.GetEnabledJobsAsync();
+
+        if (recurringJobs != null && recurringJobs.Any())
         {
-            try
+            foreach (var jobSetting in recurringJobs)
             {
-                var jobType = Type.GetType(jobSetting.JobType);
-                if (jobType == null)
+                try
                 {
-                    Log.Warning("Recurring Job Type '{JobType}' not found. Skipping registration.", jobSetting.JobType);
-                    continue;
-                }
-
-                var jobInstance = serviceProvider.GetRequiredService(jobType);
-
-                // Thay đổi cách lấy phương thức và tạo lambda để truyền JobSettings
-                var runAsyncMethod = jobType.GetMethod("RunAsync", [typeof(PerformContext), typeof(JobSettings)]);
-                if (runAsyncMethod == null)
-                {
-                    Log.Warning("Recurring Job Type '{JobType}' does not have a suitable RunAsync(PerformContext, JobSettings) method. Skipping.", jobSetting.JobType);
-                    continue;
-                }
-
-                var instanceConst = Expression.Constant(jobInstance);
-                var nullContext = Expression.Constant(null, typeof(PerformContext));
-                var jobSettingsConst = Expression.Constant(jobSetting, typeof(JobSettings));
-                var call = Expression.Call(instanceConst, runAsyncMethod, nullContext, jobSettingsConst);
-                var lambda = Expression.Lambda<Func<Task>>(call);
-
-                RecurringJob.AddOrUpdate(
-                    jobSetting.Name,
-                    lambda,
-                    jobSetting.Cron,
-                    new RecurringJobOptions
+                    // The logic inside this loop remains exactly the same
+                    var jobType = Type.GetType(jobSetting.JobType);
+                    if (jobType == null)
                     {
-                        TimeZone = TimeZoneInfo.FindSystemTimeZoneById(jobSetting.TimeZone),
+                        Log.Warning("Recurring Job Type '{JobType}' not found. Skipping job registration: '{JobName}'", jobSetting.JobType, jobSetting.Name);
+                        continue;
                     }
-                );
 
-                Log.Information("Successfully registered recurring job: '{JobName}' with schedule: '{Cron}'", jobSetting.Name, jobSetting.Cron);
+                    var jobInstance = serviceProvider.GetRequiredService(jobType);
+
+                    var runAsyncMethod = jobType.GetMethod("RunAsync", [typeof(PerformContext), typeof(JobSettings)]);
+                    if (runAsyncMethod == null)
+                    {
+                        Log.Warning("Recurring Job Type '{JobType}' does not have a suitable RunAsync method. Skipping job: '{JobName}'", jobSetting.JobType, jobSetting.Name);
+                        continue;
+                    }
+
+                    var instanceConst = Expression.Constant(jobInstance);
+                    var nullContext = Expression.Constant(null, typeof(PerformContext));
+                    var jobSettingsConst = Expression.Constant(jobSetting, typeof(JobSettings));
+                    var call = Expression.Call(instanceConst, runAsyncMethod, nullContext, jobSettingsConst);
+                    var lambda = Expression.Lambda<Func<Task>>(call);
+
+                    RecurringJob.AddOrUpdate(
+                        jobSetting.Name,
+                        lambda,
+                        jobSetting.Cron,
+                        new RecurringJobOptions
+                        {
+                            TimeZone = TimeZoneInfo.FindSystemTimeZoneById(jobSetting.TimeZone),
+                        }
+                    );
+
+                    Log.Information("Successfully registered/updated job from DB: '{JobName}' with schedule: '{Cron}'", jobSetting.Name, jobSetting.Cron);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Failed to register recurring job from DB: '{JobName}'.", jobSetting.Name);
+                }
             }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Failed to register recurring job: '{JobName}'. Please check the configuration.", jobSetting.Name);
-            }
+        }
+        else
+        {
+            Log.Information("No enabled jobs found in the database to register.");
         }
     }
 
