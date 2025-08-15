@@ -13,8 +13,8 @@ namespace MongoToSqlEtl.Common
         {
             return new DbMerge<ExpandoObject>(conn, tableName)
             {
-                MergeMode = MergeMode.InsertsOnly,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                MergeMode = MergeMode.Delta,
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
         }
 
@@ -27,6 +27,16 @@ namespace MongoToSqlEtl.Common
         {
             var sourceAsDict = (IDictionary<string, object?>)sourceRow;
             var targetDict = (IDictionary<string, object?>)new ExpandoObject();
+
+            if (sourceAsDict.TryGetValue("_id", out var idValue))
+            {
+                targetDict["id"] = MapValue(idValue, "id", keepAsObjectFields);
+
+                var exclusionSet = excludeKeys != null ? new HashSet<string>(excludeKeys, StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                exclusionSet.Add("_id");
+                excludeKeys = exclusionSet;
+            }
+
 
             if (targetColumns.Count != 0)
             {
@@ -49,13 +59,6 @@ namespace MongoToSqlEtl.Common
                 }
             }
 
-            if (sourceAsDict.ContainsKey("_id") && !targetDict.ContainsKey("_id"))
-            {
-                if (excludeKeys == null || !excludeKeys.Contains("_id"))
-                {
-                    MapProperty(sourceAsDict, targetDict, "_id", keepAsObjectFields);
-                }
-            }
             return (ExpandoObject)targetDict;
         }
 
@@ -120,20 +123,14 @@ namespace MongoToSqlEtl.Common
             return false;
         }
 
-        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
+        private static object MapValue(object? value, string key, HashSet<string>? keepAsObjectFields)
         {
-            if (target.ContainsKey(key)) return;
-            if (!source.TryGetValue(key, out object? value))
-            {
-                target[key] = DBNull.Value;
-                return;
-            }
             if (TryGetOidString(value, out var oidString))
             {
-                target[key] = oidString;
-                return;
+                // Fix CS8603: Ensure a non-null value is returned
+                return oidString ?? (object)DBNull.Value;
             }
-            target[key] = value switch
+            return value switch
             {
                 null => DBNull.Value,
                 DateTime utcDateTime => TimeZoneInfo.ConvertTimeFromUtc(utcDateTime, SEAsiaTimeZone.Value),
@@ -145,9 +142,17 @@ namespace MongoToSqlEtl.Common
             };
         }
 
-        /// <summary>
-        /// ✅ SỬA ĐỔI: Nâng cấp logic để kiểm tra xem chuỗi có phải là JSON chứa `$oid` hay không.
-        /// </summary>
+        public static void MapProperty(IDictionary<string, object?> source, IDictionary<string, object?> target, string key, HashSet<string>? keepAsObjectFields = null)
+        {
+            if (target.ContainsKey(key)) return;
+            if (!source.TryGetValue(key, out object? value))
+            {
+                target[key] = DBNull.Value;
+                return;
+            }
+            target[key] = MapValue(value, key, keepAsObjectFields);
+        }
+
         private static object ConvertStringToTypedValue(string str)
         {
             if (string.IsNullOrWhiteSpace(str))
@@ -155,16 +160,12 @@ namespace MongoToSqlEtl.Common
                 return DBNull.Value;
             }
 
-            // --- LOGIC MỚI BẮT ĐẦU TỪ ĐÂY ---
-            // Kiểm tra nhanh xem chuỗi có khả năng là một đối tượng JSON không.
             var trimmedStr = str.Trim();
             if (trimmedStr.StartsWith('{') && trimmedStr.EndsWith('}'))
             {
                 try
                 {
-                    // Thử parse chuỗi thành JSON
                     using JsonDocument doc = JsonDocument.Parse(trimmedStr);
-                    // Nếu là JSON và có chứa key "$oid", trích xuất giá trị.
                     if (doc.RootElement.TryGetProperty("$oid", out var oidElement))
                     {
                         return oidElement.GetString() ?? (object)DBNull.Value;
@@ -172,7 +173,7 @@ namespace MongoToSqlEtl.Common
                 }
                 catch (JsonException)
                 {
-                    // Nếu không phải JSON hợp lệ, bỏ qua và để logic bên dưới xử lý.
+                    // Not a valid JSON, let the logic below handle it.
                 }
             }
 

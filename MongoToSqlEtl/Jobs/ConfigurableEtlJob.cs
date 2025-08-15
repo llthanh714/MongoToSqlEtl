@@ -57,7 +57,6 @@ namespace MongoToSqlEtl.Jobs
                 Source: source,
                 Destinations: destinations,
                 ErrorDestination: logErrors,
-                // ✅ SỬA LỖI 2: Đảm bảo job này không gọi SP merge nếu không được cấu hình.
                 SqlStoredProcedureName: _jobSettings.MergeStoredProcedure ?? string.Empty
             );
         }
@@ -74,12 +73,10 @@ namespace MongoToSqlEtl.Jobs
             var tableDef = TableDefinition.FromTableName(SqlConnectionManager, currentMapping.SqlTableName);
             var transform = CreateTransformAndMapComponent([.. tableDef.Columns.Select(c => c.Name)]);
 
-            // var destination = new DbDestination<ExpandoObject>(SqlConnectionManager, currentMapping.SqlTableName);
-
             var destination = new DbMerge<ExpandoObject>(SqlConnectionManager, currentMapping.SqlTableName)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
 
             destinations.Add(destination);
@@ -100,7 +97,7 @@ namespace MongoToSqlEtl.Jobs
                     arrayFieldName: childMapping.MongoFieldName,
                     foreignKeyName: childMapping.ForeignKeyName,
                     targetColumns: [.. TableDefinition.FromTableName(SqlConnectionManager, childMapping.SqlTableName).Columns.Select(c => c.Name)],
-                    parentIdFieldName: childMapping.ParentIdSourceField
+                    parentIdFieldName: "_id"
                 );
 
                 multicast.LinkTo(flattenAndTransform,

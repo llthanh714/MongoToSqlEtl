@@ -47,13 +47,11 @@ namespace MongoToSqlEtl.Jobs
             var source = new MemorySource<ExpandoObject>(batchData);
             var logErrors = CreateErrorLoggingDestination(context);
 
-            // Multicast chính để phân phối các document 'patientorder'
             var multicastOrders = new Multicast<ExpandoObject>();
             source.LinkTo(multicastOrders);
             source.LinkErrorTo(logErrors);
 
             // ================== FLOW 1: stg_patientorders ==================
-            // Luồng này hoạt động đúng: biến đổi và ghi dữ liệu cho bảng cha.
             var transformAndMapOrders = CreateTransformAndMapComponent([.. patientordersDef.Columns.Select(c => c.Name)]);
             var destPatientOrders = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientOrdersTable);
 
@@ -62,10 +60,8 @@ namespace MongoToSqlEtl.Jobs
             transformAndMapOrders.LinkErrorTo(logErrors);
             destPatientOrders.LinkErrorTo(logErrors);
 
-
             // ================== FLOW 2: patientorderitems và dispensebatchdetail ==================
-
-            // Bước 2.1: CHỈ làm phẳng (flatten) mảng 'patientorderitems'.
+            // SỬA ĐỔI: Không cần chỉ định parentIdFieldName vì mặc định đã là "id"
             var flattenOrderItems = CreateFlattenComponent(
                 arrayFieldName: "patientorderitems",
                 foreignKeyName: "patientordersuid"
@@ -73,11 +69,9 @@ namespace MongoToSqlEtl.Jobs
             multicastOrders.LinkTo(flattenOrderItems, order => ((IDictionary<string, object?>)order).ContainsKey("patientorderitems"));
             flattenOrderItems.LinkErrorTo(logErrors);
 
-            // Bước 2.2: Multicast các 'patientorderitem' thô (chưa bị biến đổi).
             var multicastRawItems = new Multicast<ExpandoObject>();
             flattenOrderItems.LinkTo(multicastRawItems);
 
-            // -- Nhánh 2.2.1: Biến đổi và ghi vào stg_patientorderitems.
             var transformItems = CreateTransformAndMapComponent([.. patientorderitemsDef.Columns.Select(c => c.Name)]);
             var destPatientOrderItems = new DbDestination<ExpandoObject>(SqlConnectionManager, DestPatientOrderItemsTable);
             multicastRawItems.LinkTo(transformItems);
@@ -85,12 +79,11 @@ namespace MongoToSqlEtl.Jobs
             transformItems.LinkErrorTo(logErrors);
             destPatientOrderItems.LinkErrorTo(logErrors);
 
-            // -- Nhánh 2.2.2: Từ các item thô, làm phẳng và ghi 'dispensebatchdetail'.
+            // SỬA ĐỔI: Không cần chỉ định parentIdFieldName vì mặc định đã là "id"
             var flattenAndTransformDispense = CreateFlattenAndTransformComponent(
                 arrayFieldName: "dispensebatchdetail",
                 foreignKeyName: "patientorderitemsuid",
-                targetColumns: [.. dispensebatchdetailDef.Columns.Select(c => c.Name)],
-                parentIdFieldName: "_id"
+                targetColumns: [.. dispensebatchdetailDef.Columns.Select(c => c.Name)]
             );
             var destDispenseBatchDetail = new DbDestination<ExpandoObject>(SqlConnectionManager, DestDispenseBatchDetailTable);
             multicastRawItems.LinkTo(flattenAndTransformDispense, item => ((IDictionary<string, object?>)item).ContainsKey("dispensebatchdetail"));
@@ -98,8 +91,8 @@ namespace MongoToSqlEtl.Jobs
             flattenAndTransformDispense.LinkErrorTo(logErrors);
             destDispenseBatchDetail.LinkErrorTo(logErrors);
 
-
             // ================== FLOW 3: stg_patientdiagnosisuids ==================
+            // SỬA ĐỔI: Không cần chỉ định parentIdFieldName vì mặc định đã là "id"
             var flattenAndTransformDiagnosis = CreateFlattenAndTransformComponent(
                 arrayFieldName: "patientdiagnosisuids",
                 foreignKeyName: "patientordersuid",
@@ -111,8 +104,6 @@ namespace MongoToSqlEtl.Jobs
             flattenAndTransformDiagnosis.LinkErrorTo(logErrors);
             destPatientDiagnosisUids.LinkErrorTo(logErrors);
 
-
-            // Trả về pipeline với tất cả các đích
             return new EtlPipeline(
                 Source: source,
                 Destinations: [destPatientOrders, destPatientOrderItems, destPatientDiagnosisUids, destDispenseBatchDetail],

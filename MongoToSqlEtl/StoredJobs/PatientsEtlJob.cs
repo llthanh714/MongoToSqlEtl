@@ -23,21 +23,16 @@ namespace MongoToSqlEtl.StoredJobs
         private const string DestPatientContactTable = "patientscontact";
         protected override List<string> StagingTables => [];
 
-        // ✅ THAY ĐỔI 1: Chuẩn hóa lại phương thức RunAsync
-        // Chỉ cần gọi phương thức của lớp cha. Lớp cha sẽ xử lý việc ghi log và gọi SetJobSettings.
         public new Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
             return base.RunAsync(context, jobSettings);
         }
 
-        // ✅ THAY ĐỔI 2: Triển khai phương thức trừu tượng mới
-        // Vì job này không dùng settings để xây dựng pipeline, chúng ta chỉ cần một triển khai rỗng.
         protected override void SetJobSettings(JobSettings jobSettings)
         {
             // Không cần làm gì ở đây cho các job có logic cố định.
         }
 
-        // Phương thức BuildPipeline không thay đổi
         protected override EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context)
         {
             // 1. Định nghĩa các bảng
@@ -59,7 +54,8 @@ namespace MongoToSqlEtl.StoredJobs
             var destPatients = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
             multicastPatients.LinkTo(transformAndMapPatients);
             transformAndMapPatients.LinkTo(destPatients);
@@ -70,12 +66,14 @@ namespace MongoToSqlEtl.StoredJobs
             var flattenAndTransformPatientsAddress = CreateFlattenAndTransformComponent(
                 arrayFieldName: "address",
                 foreignKeyName: "patientsuid",
-                targetColumns: [.. patientsaddressDef.Columns.Select(c => c.Name)]
+                targetColumns: [.. patientsaddressDef.Columns.Select(c => c.Name)],
+                parentIdFieldName: "id" // Sử dụng "id" của cha
             );
             var destPatientsAddress = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientAddressTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
             multicastPatients.LinkTo(flattenAndTransformPatientsAddress, o => ((IDictionary<string, object?>)o).ContainsKey("address"));
             flattenAndTransformPatientsAddress.LinkTo(destPatientsAddress);
@@ -86,12 +84,14 @@ namespace MongoToSqlEtl.StoredJobs
             var flattenAndTransformPatientsContact = CreateFlattenAndTransformComponent(
                 arrayFieldName: "contact",
                 foreignKeyName: "patientsuid",
-                targetColumns: [.. patientscontactDef.Columns.Select(c => c.Name)]
+                targetColumns: [.. patientscontactDef.Columns.Select(c => c.Name)],
+                parentIdFieldName: "id" // Sử dụng "id" của cha
             );
             var destPatientsContact = new DbMerge<ExpandoObject>(SqlConnectionManager, DestPatientContactTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
             multicastPatients.LinkTo(flattenAndTransformPatientsContact, o => ((IDictionary<string, object?>)o).ContainsKey("contact"));
             flattenAndTransformPatientsContact.LinkTo(destPatientsContact);

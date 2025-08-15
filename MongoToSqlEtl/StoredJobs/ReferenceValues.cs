@@ -46,7 +46,8 @@ namespace MongoToSqlEtl.StoredJobs
             var destObjects = new DbMerge<ExpandoObject>(SqlConnectionManager, DestReferenceValuesTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
 
             source.LinkTo(transformAndMapObjects);

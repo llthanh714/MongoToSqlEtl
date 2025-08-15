@@ -24,18 +24,15 @@ namespace MongoToSqlEtl.Jobs
         protected readonly MongoClient MongoClient = mongoClient;
         protected readonly INotificationService NotificationService = notificationService;
 
-        // Sửa đổi: Khởi tạo với `null!` để báo cho compiler rằng chúng sẽ được gán giá trị trước khi sử dụng.
         protected EtlLogManager LogManager = null!;
         protected EtlFailedRecordManager FailedRecordManager = null!;
 
         protected ConcurrentBag<string> CurrentRunFailedIds { get; private set; } = [];
         protected abstract List<string> StagingTables { get; }
 
-        // Sửa đổi: Giữ lại thuộc tính này, nó sẽ hoạt động đúng sau khi tái cấu trúc.
         protected abstract string SourceCollectionName { get; }
         protected abstract string MongoDatabaseName { get; }
 
-        // Mới: Phương thức trừu tượng để lớp con lưu lại job settings.
         protected abstract void SetJobSettings(JobSettings jobSettings);
 
         protected abstract EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context);
@@ -46,22 +43,17 @@ namespace MongoToSqlEtl.Jobs
             int logId = 0;
             try
             {
-                // Bước 1: Cho phép lớp con thiết lập trạng thái nội bộ của nó. Đây là bước quan trọng nhất.
                 SetJobSettings(jobSettings);
 
-                // Bước 2: Bây giờ SourceCollectionName đã có thể truy cập an toàn.
-                // Khởi tạo các manager ở đây.
                 LogManager = new EtlLogManager(SqlConnectionManager, SourceCollectionName);
                 FailedRecordManager = new EtlFailedRecordManager(SqlConnectionManager, SourceCollectionName);
 
-                // Các logic còn lại của RunAsync giữ nguyên...
                 long recordsToSkip = 0;
                 if (jobSettings.Backfill.Enabled)
                 {
                     recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
                 }
 
-                // ... (phần còn lại của phương thức không thay đổi)
                 var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings.Backfill.Enabled);
 
                 if (batchData.Count == 0)
@@ -93,7 +85,7 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine("Network execution has finished.");
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
-                long failedCount = 0;
+                long failedCount = CurrentRunFailedIds.Count;
 
                 context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful (Total Processed): {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
@@ -103,7 +95,7 @@ namespace MongoToSqlEtl.Jobs
                 context?.WriteLine($"Job '{SourceCollectionName}' has failed with a critical error.");
                 context?.WriteLine(ex.ToString());
                 context?.ResetTextColor();
-                if (logId > 0 && LogManager != null) // Thêm kiểm tra null để an toàn
+                if (logId > 0 && LogManager != null)
                 {
                     LogManager.UpdateLogEntryOnFailure(logId, ex.ToString());
                     await NotificationService.SendFatalErrorAsync(SourceCollectionName, ex);
@@ -115,10 +107,8 @@ namespace MongoToSqlEtl.Jobs
         protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, bool isBackfill)
         {
             var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
-            var allData = new List<ExpandoObject>();
             var documentMap = new Dictionary<string, BsonDocument>();
 
-            // 1. Ưu tiên lấy các bản ghi bị lỗi đang chờ xử lý lại
             var pendingFailedIds = FailedRecordManager.GetPendingFailedRecordIds();
             if (pendingFailedIds.Count != 0)
             {
@@ -133,7 +123,6 @@ namespace MongoToSqlEtl.Jobs
                 }
             }
 
-            // 2. Lấy dữ liệu mới nếu vẫn còn chỗ trong batch
             var remainingBatchSize = batchSize - documentMap.Count;
             if (remainingBatchSize > 0)
             {
@@ -165,11 +154,9 @@ namespace MongoToSqlEtl.Jobs
                 foreach (var doc in newDocuments)
                 {
                     var idString = doc["_id"].IsObjectId ? doc["_id"].AsObjectId.ToString() : doc["_id"].AsString;
-                    // Tránh thêm trùng lặp nếu một bản ghi vừa lỗi vừa nằm trong batch mới
                     documentMap.TryAdd(idString, doc);
                 }
             }
-
 
             if (documentMap.Count == 0)
             {
@@ -178,21 +165,11 @@ namespace MongoToSqlEtl.Jobs
 
             var documents = documentMap.Values.ToList();
 
-            // Sắp xếp lại để đảm bảo thứ tự xử lý nhất quán (quan trọng cho watermark)
             documents.Sort((a, b) =>
             {
-                // Lấy ra giá trị để so sánh từ mỗi document. Ưu tiên 'modifiedat'.
                 var valA = a.Contains("modifiedat") ? a["modifiedat"] : a["_id"];
                 var valB = b.Contains("modifiedat") ? b["modifiedat"] : b["_id"];
-
-                // Nếu cả hai giá trị cùng loại, hãy so sánh chúng trực tiếp.
-                if (valA.BsonType == valB.BsonType)
-                {
-                    return valA.CompareTo(valB);
-                }
-
-                // Nếu chúng khác loại, quy ước rằng BsonDateTime (ngày tháng) luôn "lớn hơn" BsonObjectId (ID).
-                // Điều này đảm bảo các document có 'modifiedat' sẽ được xếp sau, là điều chúng ta muốn để lấy watermark.
+                if (valA.BsonType == valB.BsonType) return valA.CompareTo(valB);
                 return valA.BsonType == BsonType.DateTime ? 1 : -1;
             });
 
@@ -200,9 +177,8 @@ namespace MongoToSqlEtl.Jobs
             var lastIdValue = lastDoc["_id"].IsObjectId ? lastDoc["_id"].AsObjectId.ToString() : lastDoc["_id"].AsString;
             var newWatermark = new EtlWatermark(lastDoc.Contains("modifiedat") ? lastDoc["modifiedat"].ToUniversalTime() : DateTime.UtcNow, lastIdValue);
 
-            var expandoData = documents.Select(doc => ConvertToExando(doc)).Where(e => e != null).Cast<ExpandoObject>().ToList();
+            var expandoData = documents.Select(ConvertToExando).Where(e => e != null).Cast<ExpandoObject>().ToList();
 
-            // Đánh dấu các bản ghi được retry là đã được xử lý (để tránh lặp lại mãi mãi)
             if (pendingFailedIds.Count != 0)
             {
                 FailedRecordManager.MarkRecordsAsResolved(pendingFailedIds);
@@ -212,32 +188,20 @@ namespace MongoToSqlEtl.Jobs
             return (expandoData, newWatermark);
         }
 
-
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "_id")
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "id")
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName));
         }
 
-        /// <summary>
-        /// Xử lý đúng đối tượng JsonElement khi làm phẳng mảng.
-        /// </summary>
         private static IEnumerable<ExpandoObject> Flatten(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, string parentIdFieldName)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
-            {
-                yield break;
-            }
-            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
 
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
-            {
-                yield break;
-            }
+            var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
 
             var itemsToProcess = new List<object>();
-
-            // Logic mới: Kiểm tra nếu là JsonElement dạng mảng thì lặp qua nó
             if (value is JsonElement jsonElement && jsonElement.ValueKind == JsonValueKind.Array)
             {
                 itemsToProcess.AddRange(jsonElement.EnumerateArray().Select(e => (object)e));
@@ -248,7 +212,6 @@ namespace MongoToSqlEtl.Jobs
             }
             else
             {
-                // Coi như là một danh sách chỉ có một phần tử
                 itemsToProcess.Add(value);
             }
 
@@ -260,43 +223,27 @@ namespace MongoToSqlEtl.Jobs
 
                 var itemCopy = new ExpandoObject();
                 var itemDict = (IDictionary<string, object?>)itemCopy;
-
-                foreach (var kvp in (IDictionary<string, object?>)itemAsExpando)
-                {
-                    itemDict[kvp.Key] = kvp.Value;
-                }
+                foreach (var kvp in (IDictionary<string, object?>)itemAsExpando) itemDict[kvp.Key] = kvp.Value;
 
                 itemDict[foreignKeyName] = parentIdAsString;
                 yield return itemCopy;
             }
         }
 
-        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName = "_id", HashSet<string>? keepAsObjectFields = null)
+        protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenAndTransformComponent(string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName = "id", HashSet<string>? keepAsObjectFields = null)
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => FlattenAndTransform(parentRow, arrayFieldName, foreignKeyName, targetColumns, parentIdFieldName, keepAsObjectFields));
         }
 
-        /// <summary>
-        /// Xử lý đúng đối tượng JsonElement khi làm phẳng và biến đổi mảng.
-        /// </summary>
         private static IEnumerable<ExpandoObject> FlattenAndTransform(ExpandoObject parentRow, string arrayFieldName, string foreignKeyName, ICollection<string> targetColumns, string parentIdFieldName, HashSet<string>? keepAsObjectFields)
         {
             var parentAsDict = (IDictionary<string, object?>)parentRow;
+            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue)) yield break;
 
-            if (!parentAsDict.TryGetValue(parentIdFieldName, out var parentIdValue))
-            {
-                yield break;
-            }
             var parentIdAsString = parentIdValue?.ToString() ?? string.Empty;
-
-            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null)
-            {
-                yield break;
-            }
+            if (!parentAsDict.TryGetValue(arrayFieldName, out object? value) || value == null) yield break;
 
             var itemsToProcess = new List<object>();
-
-            // Logic mới: Kiểm tra nếu là JsonElement dạng mảng thì lặp qua nó
             if (value is JsonElement jsonElement && jsonElement.ValueKind == JsonValueKind.Array)
             {
                 itemsToProcess.AddRange(jsonElement.EnumerateArray().Select(e => (object)e));
@@ -307,7 +254,6 @@ namespace MongoToSqlEtl.Jobs
             }
             else
             {
-                // Coi như là một danh sách chỉ có một phần tử
                 itemsToProcess.Add(value);
             }
 
@@ -325,7 +271,6 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
-        // ... các phương thức không thay đổi khác ...
         protected static RowTransformation<ExpandoObject> CreateTransformAndMapComponent(ICollection<string> targetColumns, HashSet<string>? keepAsObjectFields = null)
         {
             return new RowTransformation<ExpandoObject>(row => DataTransformer.TransformObject(row, targetColumns, keepAsObjectFields));
@@ -344,16 +289,12 @@ namespace MongoToSqlEtl.Jobs
                 if (obj is JsonElement jsonElem)
                 {
                     var rawJson = jsonElem.GetRawText();
-                    if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.Trim().StartsWith('{'))
-                    {
-                        return null;
-                    }
+                    if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.Trim().StartsWith('{')) return null;
                     return JsonSerializer.Deserialize<ExpandoObject>(rawJson);
                 }
 
                 var generalJson = JsonSerializer.Serialize(obj);
-                var generalExpando = JsonSerializer.Deserialize<ExpandoObject>(generalJson);
-                return generalExpando;
+                return JsonSerializer.Deserialize<ExpandoObject>(generalJson);
             }
             catch (Exception ex)
             {
@@ -370,7 +311,6 @@ namespace MongoToSqlEtl.Jobs
                 {
                     var exception = error.GetException();
                     var json = error.RecordAsJson;
-
                     if (string.IsNullOrEmpty(json))
                     {
                         Log.Error(exception, "Error record data (RecordAsJson) is null or empty.");
@@ -395,7 +335,7 @@ namespace MongoToSqlEtl.Jobs
 
                     foreach (var recordDict in records)
                     {
-                        if (recordDict != null && recordDict.TryGetValue("_id", out var idValue) && idValue != null)
+                        if (recordDict != null && recordDict.TryGetValue("id", out var idValue) && idValue != null)
                         {
                             string recordId = idValue.ToString()!;
                             if (!string.IsNullOrEmpty(recordId))
@@ -440,10 +380,7 @@ namespace MongoToSqlEtl.Jobs
 
             var tableData = new DataTable("StringList");
             tableData.Columns.Add("Value", typeof(string));
-            foreach (var tableName in tablesToTruncate)
-            {
-                tableData.Rows.Add(tableName);
-            }
+            foreach (var tableName in tablesToTruncate) tableData.Rows.Add(tableName);
 
             try
             {

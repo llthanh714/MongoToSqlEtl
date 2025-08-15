@@ -55,7 +55,8 @@ namespace MongoToSqlEtl.StoredJobs
             var destOrderItems = new DbMerge<ExpandoObject>(SqlConnectionManager, DestOrderItemsTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
 
             multicast.LinkTo(transformAndMapOrderItems);
@@ -67,13 +68,15 @@ namespace MongoToSqlEtl.StoredJobs
             var flattenAndTransformCodes = CreateFlattenAndTransformComponent(
                 arrayFieldName: "orderitemcodes",
                 foreignKeyName: "orderitemsuid",
-                targetColumns: [.. orderitemcodesDef.Columns.Select(c => c.Name)]
+                targetColumns: [.. orderitemcodesDef.Columns.Select(c => c.Name)],
+                parentIdFieldName: "id" // Sử dụng "id" của cha
             );
 
             var destCodes = new DbMerge<ExpandoObject>(SqlConnectionManager, DestOrderItemCodesTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
 
             multicast.LinkTo(flattenAndTransformCodes, o => ((IDictionary<string, object?>)o).ContainsKey("orderitemcodes"));
@@ -85,13 +88,15 @@ namespace MongoToSqlEtl.StoredJobs
             var flattenAndTransformInstructions = CreateFlattenAndTransformComponent(
                 arrayFieldName: "orderiteminstructions",
                 foreignKeyName: "orderitemsuid",
-                targetColumns: [.. orderiteminstructionsDef.Columns.Select(c => c.Name)]
+                targetColumns: [.. orderiteminstructionsDef.Columns.Select(c => c.Name)],
+                parentIdFieldName: "id" // Sử dụng "id" của cha
             );
 
             var destInstructions = new DbMerge<ExpandoObject>(SqlConnectionManager, DestOrderItemInstructionsTable)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "_id" }]
+                // SỬA ĐỔI: Sử dụng "id" làm khóa chính
+                IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
 
             multicast.LinkTo(flattenAndTransformInstructions, o => ((IDictionary<string, object?>)o).ContainsKey("orderiteminstructions"));
