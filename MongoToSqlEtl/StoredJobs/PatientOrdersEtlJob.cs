@@ -4,10 +4,11 @@ using ETLBox.DataFlow;
 using Hangfire.Server;
 using MongoDB.Driver;
 using MongoToSqlEtl.Common;
+using MongoToSqlEtl.Jobs;
 using MongoToSqlEtl.Services;
 using System.Dynamic;
 
-namespace MongoToSqlEtl.Jobs
+namespace MongoToSqlEtl.StoredJobs
 {
     public class PatientOrdersEtlJob(IConnectionManager sqlConnectionManager, MongoClient mongoClient, INotificationService notificationService) : EtlJob(sqlConnectionManager, mongoClient, notificationService)
     {

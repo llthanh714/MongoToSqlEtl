@@ -69,7 +69,6 @@ try
     builder.Services.AddSingleton<IJobConfigurationService, JobConfigurationService>();
     builder.Services.AddTransient<JobReloaderJob>();
     builder.Services.AddTransient<ConfigurableEtlJob>();
-    builder.Services.AddTransient<PatientOrdersEtlJob>();
 
     var hangfireConfig = builder.Configuration.GetConnectionString("Hangfire");
     if (string.IsNullOrWhiteSpace(hangfireConfig)) throw new InvalidOperationException("Connection string 'Hangfire' not found.");
