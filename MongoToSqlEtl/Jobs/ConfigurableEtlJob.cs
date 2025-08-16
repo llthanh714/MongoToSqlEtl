@@ -63,48 +63,52 @@ namespace MongoToSqlEtl.Jobs
 
         private void ProcessMappings(
             TableMapping currentMapping,
-            IDataFlowSource<ExpandoObject> parentSource,
+            IDataFlowSource<ExpandoObject> sourceOfRawDataForThisLevel,
             CustomDestination<ETLBoxError> errorDestination,
             List<IDataFlowDestination<ExpandoObject>> destinations,
             PerformContext? context)
         {
             context?.WriteLine($"Processing mapping for: {currentMapping.MongoFieldName} -> {currentMapping.SqlTableName}");
 
+            // 1. Tạo một điểm rẽ nhánh (Multicast) cho luồng dữ liệu GỐC của cấp hiện tại.
+            // Điều này cho phép chúng ta vừa xử lý-lưu cấp hiện tại, vừa làm phẳng-truyền cho cấp con.
+            var multicastRaw = new Multicast<ExpandoObject>();
+            sourceOfRawDataForThisLevel.LinkTo(multicastRaw);
+
+            // 2. NHÁNH A: Xử lý và lưu dữ liệu cho bảng của cấp hiện tại.
             var tableDef = TableDefinition.FromTableName(SqlConnectionManager, currentMapping.SqlTableName);
             var transform = CreateTransformAndMapComponent([.. tableDef.Columns.Select(c => c.Name)]);
-
             var destination = new DbMerge<ExpandoObject>(SqlConnectionManager, currentMapping.SqlTableName)
             {
                 MergeMode = MergeMode.Delta,
                 IdColumns = [new IdColumn { IdPropertyName = "id" }]
             };
-
             destinations.Add(destination);
 
-            var multicast = new Multicast<ExpandoObject>();
-            parentSource.LinkTo(multicast);
-
-            multicast.LinkTo(transform);
+            multicastRaw.LinkTo(transform);
             transform.LinkTo(destination);
             transform.LinkErrorTo(errorDestination);
             destination.LinkErrorTo(errorDestination);
 
+            // 3. NHÁNH B: Tìm và xử lý tất cả các mapping con.
             var childMappings = _jobSettings.Mappings.Where(m => m.ParentMongoFieldName == currentMapping.MongoFieldName).ToList();
-
             foreach (var childMapping in childMappings)
             {
-                var flattenAndTransform = CreateFlattenAndTransformComponent(
+                // 3.1. Đối với mỗi con, tạo một component "làm phẳng".
+                // Component này lấy dữ liệu từ multicast GỐC ở trên.
+                var flatten = CreateFlattenComponent(
                     arrayFieldName: childMapping.MongoFieldName,
                     foreignKeyName: childMapping.ForeignKeyName,
-                    targetColumns: [.. TableDefinition.FromTableName(SqlConnectionManager, childMapping.SqlTableName).Columns.Select(c => c.Name)],
+                    // QUAN TRỌNG: Vì chúng ta đang làm việc trên dữ liệu gốc,
+                    // trường ID của cha luôn là "_id" tại thời điểm này.
                     parentIdFieldName: "_id"
                 );
+                multicastRaw.LinkTo(flatten, obj => ((IDictionary<string, object?>)obj).ContainsKey(childMapping.MongoFieldName));
+                flatten.LinkErrorTo(errorDestination);
 
-                multicast.LinkTo(flattenAndTransform,
-                    obj => ((IDictionary<string, object?>)obj).ContainsKey(childMapping.MongoFieldName));
-                flattenAndTransform.LinkErrorTo(errorDestination);
-
-                ProcessMappings(childMapping, flattenAndTransform, errorDestination, destinations, context);
+                // 3.2. Luồng đầu ra của component 'flatten' chính là luồng dữ liệu GỐC cho cấp con.
+                // Gọi đệ quy để lặp lại quy trình này cho cấp con.
+                ProcessMappings(childMapping, flatten, errorDestination, destinations, context);
             }
         }
     }
