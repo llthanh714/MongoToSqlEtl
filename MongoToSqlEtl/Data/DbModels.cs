@@ -11,6 +11,7 @@
         public bool Enabled { get; set; }
         public int MaxRecordsPerJob { get; set; }
         public bool BackfillEnabled { get; set; }
+        public DateTime? BackfillUntilDateUtc { get; set; }
         public string? MergeStoredProcedure { get; set; }
     }
 

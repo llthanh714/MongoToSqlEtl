@@ -54,7 +54,7 @@ namespace MongoToSqlEtl.Jobs
                     recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
                 }
 
-                var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings.Backfill.Enabled);
+                var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings);
 
                 if (batchData.Count == 0)
                 {
@@ -104,7 +104,7 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
-        protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, bool isBackfill)
+        protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, JobSettings jobSettings)
         {
             var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
             var documentMap = new Dictionary<string, BsonDocument>();
@@ -130,11 +130,23 @@ namespace MongoToSqlEtl.Jobs
                 FilterDefinition<BsonDocument> filter;
                 SortDefinition<BsonDocument> sort;
 
-                if (isBackfill)
+                // SỬA ĐỔI: Logic lấy dữ liệu backfill chạy ngược
+                if (jobSettings.Backfill.Enabled)
                 {
-                    Log.Information("[{JobName}] Running in Backfill mode. Skipping: {Skip}, Taking: {Take}", SourceCollectionName, recordsToSkip, remainingBatchSize);
                     filter = filterBuilder.Empty;
-                    sort = Builders<BsonDocument>.Sort.Ascending("_id");
+
+                    if (jobSettings.Backfill.BackfillUntilDateUtc.HasValue)
+                    {
+                        var startDate = jobSettings.Backfill.BackfillUntilDateUtc.Value;
+                        Log.Information("[{JobName}] Running in REVERSE Backfill mode, starting from records on or before {StartDate}", SourceCollectionName, startDate);
+                        filter &= filterBuilder.Lte("modifiedat", startDate);
+                    }
+                    else
+                    {
+                        Log.Information("[{JobName}] Running in REVERSE Backfill mode from the latest record.", SourceCollectionName);
+                    }
+
+                    sort = Builders<BsonDocument>.Sort.Descending("modifiedat").Descending("_id");
                 }
                 else
                 {
@@ -145,10 +157,12 @@ namespace MongoToSqlEtl.Jobs
                 }
 
                 var findQuery = collection.Find(filter).Sort(sort);
-                if (isBackfill)
+
+                if (jobSettings.Backfill.Enabled)
                 {
                     findQuery = findQuery.Skip((int)recordsToSkip);
                 }
+
                 var newDocuments = await findQuery.Limit(remainingBatchSize).ToListAsync();
 
                 foreach (var doc in newDocuments)
@@ -165,6 +179,7 @@ namespace MongoToSqlEtl.Jobs
 
             var documents = documentMap.Values.ToList();
 
+            // Sắp xếp lại batch cuối cùng để đảm bảo watermark là giá trị nhỏ nhất/cũ nhất trong batch
             documents.Sort((a, b) =>
             {
                 var valA = a.Contains("modifiedat") ? a["modifiedat"] : a["_id"];
@@ -188,6 +203,7 @@ namespace MongoToSqlEtl.Jobs
             return (expandoData, newWatermark);
         }
 
+        #region Unchanged Methods
         protected static RowMultiplication<ExpandoObject, ExpandoObject> CreateFlattenComponent(string arrayFieldName, string foreignKeyName, string parentIdFieldName = "id")
         {
             return new RowMultiplication<ExpandoObject, ExpandoObject>(parentRow => Flatten(parentRow, arrayFieldName, foreignKeyName, parentIdFieldName));
@@ -409,5 +425,6 @@ namespace MongoToSqlEtl.Jobs
                 throw new Exception("Failed to truncate staging tables via stored procedure, aborting job execution.", ex);
             }
         }
+        #endregion
     }
 }

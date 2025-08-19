@@ -1,8 +1,7 @@
-﻿// In file: Services/JobConfigurationService.cs
-using Dapper;
+﻿using Dapper;
 using Microsoft.Data.SqlClient;
 using MongoToSqlEtl.Common;
-using MongoToSqlEtl.Data; // Using the DbModels created in the previous step
+using MongoToSqlEtl.Data;
 using Serilog;
 
 namespace MongoToSqlEtl.Services
@@ -58,7 +57,11 @@ namespace MongoToSqlEtl.Services
                         TimeZone = jobDb.TimeZone,
                         Enabled = jobDb.Enabled,
                         MaxRecordsPerJob = jobDb.MaxRecordsPerJob,
-                        Backfill = new BackfillSettings { Enabled = jobDb.BackfillEnabled },
+                        Backfill = new BackfillSettings
+                        {
+                            Enabled = jobDb.BackfillEnabled,
+                            BackfillUntilDateUtc = jobDb.BackfillUntilDateUtc
+                        },
                         MergeStoredProcedure = jobDb.MergeStoredProcedure,
                         Mappings = [.. mappingsFromDb]
                     };

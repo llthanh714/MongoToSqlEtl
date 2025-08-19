@@ -7,7 +7,7 @@
     {
         /// <summary>
         /// Tên trường trong document MongoDB. Đối với document gốc, có thể để trống hoặc dùng một tên đại diện.
-        /// </gsummary>
+        /// </summary>
         public string MongoFieldName { get; set; } = string.Empty;
 
         /// <summary>
@@ -95,5 +95,12 @@
         /// Kích hoạt chế độ backfill.
         /// </summary>
         public bool Enabled { get; set; }
+
+        /// <summary>
+        /// (MỚI) Chỉ định ngày (UTC) để BẮT ĐẦU chạy backfill ngược về quá khứ.
+        /// Nếu được đặt, backfill sẽ chỉ xử lý các bản ghi có ngày tạo/sửa đổi
+        /// nhỏ hơn hoặc bằng ngày này. Nếu null, sẽ bắt đầu từ bản ghi mới nhất.
+        /// </summary>
+        public DateTime? BackfillUntilDateUtc { get; set; }
     }
 }
