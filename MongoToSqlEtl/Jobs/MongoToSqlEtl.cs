@@ -37,6 +37,7 @@ namespace MongoToSqlEtl.Jobs
 
         protected abstract EtlPipeline BuildPipeline(List<ExpandoObject> batchData, PerformContext? context);
 
+
         [DisableConcurrentExecution(timeoutInSeconds: 15 * 60)]
         public async Task RunAsync(PerformContext? context, JobSettings jobSettings)
         {
@@ -48,13 +49,7 @@ namespace MongoToSqlEtl.Jobs
                 LogManager = new EtlLogManager(SqlConnectionManager, SourceCollectionName);
                 FailedRecordManager = new EtlFailedRecordManager(SqlConnectionManager, SourceCollectionName);
 
-                long recordsToSkip = 0;
-                if (jobSettings.Backfill.Enabled)
-                {
-                    recordsToSkip = LogManager.GetTotalBackfillRecordsProcessed();
-                }
-
-                var (batchData, newWatermark) = await FetchNextBatchAsync(recordsToSkip, jobSettings.MaxRecordsPerJob, jobSettings);
+                var (batchData, newWatermark) = await FetchNextBatchAsync(jobSettings);
 
                 if (batchData.Count == 0)
                 {
@@ -67,28 +62,24 @@ namespace MongoToSqlEtl.Jobs
                 }
 
                 var previousWatermark = LogManager.GetLastSuccessfulWatermark();
-                logId = LogManager.StartNewLogEntry(previousWatermark, newWatermark);
+                logId = LogManager.StartNewLogEntry(previousWatermark, newWatermark, jobSettings.Backfill.Enabled);
 
                 await TruncateStagingTablesAsync(context);
-
                 var pipeline = BuildPipeline(batchData, context);
-
                 context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}' with {batchData.Count} records...");
                 await Network.ExecuteAsync(pipeline.Source);
-
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
                     var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}") { ConnectionManager = SqlConnectionManager, DisableLogging = true };
                     await mergeDataTask.ExecuteNonQueryAsync();
                 }
-
                 context?.WriteLine("Network execution has finished.");
                 long totalSourceCount = pipeline.Source.ProgressCount;
                 long successCount = pipeline.Destinations.Sum(d => d.ProgressCount);
                 long failedCount = CurrentRunFailedIds.Count;
-
                 context?.WriteLine($"Summary --> Source: {totalSourceCount}, Successful (Total Processed): {successCount}, Failed: {failedCount}");
                 LogManager.UpdateLogEntryOnSuccess(logId, totalSourceCount, successCount, failedCount);
+
             }
             catch (Exception ex)
             {
@@ -104,10 +95,11 @@ namespace MongoToSqlEtl.Jobs
             }
         }
 
-        protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(long recordsToSkip, int batchSize, JobSettings jobSettings)
+        protected virtual async Task<(List<ExpandoObject> Data, EtlWatermark NewWatermark)> FetchNextBatchAsync(JobSettings jobSettings)
         {
             var collection = MongoClient.GetDatabase(MongoDatabaseName).GetCollection<BsonDocument>(SourceCollectionName);
             var documentMap = new Dictionary<string, BsonDocument>();
+            var batchSize = jobSettings.MaxRecordsPerJob;
 
             var pendingFailedIds = FailedRecordManager.GetPendingFailedRecordIds();
             if (pendingFailedIds.Count != 0)
@@ -130,40 +122,44 @@ namespace MongoToSqlEtl.Jobs
                 FilterDefinition<BsonDocument> filter;
                 SortDefinition<BsonDocument> sort;
 
-                // SỬA ĐỔI: Logic lấy dữ liệu backfill chạy ngược
                 if (jobSettings.Backfill.Enabled)
                 {
-                    filter = filterBuilder.Empty;
+                    sort = Builders<BsonDocument>.Sort.Descending("modifiedat").Descending("_id");
+                    var lastBackfillMark = LogManager.GetLastBackfillWatermark();
 
-                    if (jobSettings.Backfill.BackfillUntilDateUtc.HasValue)
+                    if (lastBackfillMark == null) // Lần chạy backfill đầu tiên
                     {
-                        var startDate = jobSettings.Backfill.BackfillUntilDateUtc.Value;
-                        Log.Information("[{JobName}] Running in REVERSE Backfill mode, starting from records on or before {StartDate}", SourceCollectionName, startDate);
-                        filter &= filterBuilder.Lte("modifiedat", startDate);
+                        filter = filterBuilder.Empty;
+                        if (jobSettings.Backfill.BackfillUntilDateUtc.HasValue)
+                        {
+                            var startDate = jobSettings.Backfill.BackfillUntilDateUtc.Value;
+                            Log.Information("[{JobName}] First backfill run. Starting from records on or before {StartDate}", SourceCollectionName, startDate);
+                            filter &= filterBuilder.Lte("modifiedat", startDate);
+                        }
+                        else
+                        {
+                            Log.Information("[{JobName}] First backfill run. Starting from the latest record.", SourceCollectionName);
+                        }
                     }
                     else
                     {
-                        Log.Information("[{JobName}] Running in REVERSE Backfill mode from the latest record.", SourceCollectionName);
-                    }
+                        Log.Information("[{JobName}] Continuing backfill. Fetching records before {Timestamp} and ID {Id}", SourceCollectionName, lastBackfillMark.LastModifiedAt, lastBackfillMark.LastId);
+                        var lastId = new ObjectId(lastBackfillMark.LastId);
 
-                    sort = Builders<BsonDocument>.Sort.Descending("modifiedat").Descending("_id");
+                        // Kỹ thuật Keyset Pagination: Lấy các trang tiếp theo dựa trên giá trị của trang trước
+                        filter = filterBuilder.Lt("modifiedat", lastBackfillMark.LastModifiedAt) |
+                                 (filterBuilder.Eq("modifiedat", lastBackfillMark.LastModifiedAt) & filterBuilder.Lt("_id", lastId));
+                    }
                 }
                 else
                 {
+                    sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
                     var lastWatermark = LogManager.GetLastSuccessfulWatermark();
                     Log.Information("[{JobName}] Running in Normal mode. Filtering by modifiedat > {Date}", SourceCollectionName, lastWatermark.LastModifiedAt);
                     filter = filterBuilder.Gt("modifiedat", lastWatermark.LastModifiedAt);
-                    sort = Builders<BsonDocument>.Sort.Ascending("modifiedat");
                 }
 
-                var findQuery = collection.Find(filter).Sort(sort);
-
-                if (jobSettings.Backfill.Enabled)
-                {
-                    findQuery = findQuery.Skip((int)recordsToSkip);
-                }
-
-                var newDocuments = await findQuery.Limit(remainingBatchSize).ToListAsync();
+                var newDocuments = await collection.Find(filter).Sort(sort).Limit(remainingBatchSize).ToListAsync();
 
                 foreach (var doc in newDocuments)
                 {
@@ -179,18 +175,31 @@ namespace MongoToSqlEtl.Jobs
 
             var documents = documentMap.Values.ToList();
 
-            // Sắp xếp lại batch cuối cùng để đảm bảo watermark là giá trị nhỏ nhất/cũ nhất trong batch
+            // Sắp xếp lại batch cuối cùng để đảm bảo watermark được ghi nhận chính xác
             documents.Sort((a, b) =>
             {
                 var valA = a.Contains("modifiedat") ? a["modifiedat"] : a["_id"];
                 var valB = b.Contains("modifiedat") ? b["modifiedat"] : b["_id"];
                 if (valA.BsonType == valB.BsonType) return valA.CompareTo(valB);
-                return valA.BsonType == BsonType.DateTime ? 1 : -1;
+                return valA.BsonType == BsonType.DateTime ? 1 : -1; // Sắp xếp theo ngày tăng dần
             });
 
-            var lastDoc = documents.Last();
-            var lastIdValue = lastDoc["_id"].IsObjectId ? lastDoc["_id"].AsObjectId.ToString() : lastDoc["_id"].AsString;
-            var newWatermark = new EtlWatermark(lastDoc.Contains("modifiedat") ? lastDoc["modifiedat"].ToUniversalTime() : DateTime.UtcNow, lastIdValue);
+            // (SỬA ĐỔI) Watermark mới là bản ghi CŨ NHẤT trong batch (cho backfill) hoặc MỚI NHẤT (cho live)
+            BsonDocument watermarkDoc;
+            if (jobSettings.Backfill.Enabled)
+            {
+                // Trong chế độ backfill ngược, watermark là bản ghi CŨ NHẤT trong batch đã lấy
+                watermarkDoc = documents.First();
+            }
+            else
+            {
+                // Trong chế độ live, watermark là bản ghi MỚI NHẤT
+                watermarkDoc = documents.Last();
+            }
+
+            var lastIdValue = watermarkDoc["_id"].IsObjectId ? watermarkDoc["_id"].AsObjectId.ToString() : watermarkDoc["_id"].AsString;
+            var newWatermarkTime = watermarkDoc.Contains("modifiedat") ? watermarkDoc["modifiedat"].ToUniversalTime() : DateTime.UtcNow;
+            var newWatermark = new EtlWatermark(newWatermarkTime, lastIdValue);
 
             var expandoData = documents.Select(ConvertToExando).Where(e => e != null).Cast<ExpandoObject>().ToList();
 
@@ -199,7 +208,7 @@ namespace MongoToSqlEtl.Jobs
                 FailedRecordManager.MarkRecordsAsResolved(pendingFailedIds);
             }
 
-            Log.Information("[{JobName}] Fetched {Count} records ({RetryCount} retries, {NewCount} new). New watermark: {Watermark}", SourceCollectionName, expandoData.Count, pendingFailedIds.Count, documents.Count - pendingFailedIds.Count, newWatermark);
+            Log.Information("[{JobName}] Fetched {Count} records ({RetryCount} retries, {NewCount} new). New watermark to be logged: {Watermark}", SourceCollectionName, expandoData.Count, pendingFailedIds.Count, documents.Count - pendingFailedIds.Count, newWatermark);
             return (expandoData, newWatermark);
         }
 

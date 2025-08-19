@@ -13,87 +13,90 @@ namespace MongoToSqlEtl.Managers
         private static readonly DateTime FallbackStartDate = new(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         /// <summary>
-        /// ✅ SỬA ĐỔI: Loại bỏ hoàn toàn logic kiểm tra `isBackfill`.
-        /// Phương thức này giờ đây chỉ có một nhiệm vụ: đọc log cuối cùng một cách trung thực.
+        /// Lấy watermark TOÀN CỤC. Hàm này tìm mốc thời gian thành công gần đây nhất
+        /// bất kể nó được tạo bởi job 'Live' hay 'Backfill'.
+        /// Điều này tối quan trọng để job Live biết chính xác nơi để bắt đầu.
         /// </summary>
-        public EtlWatermark GetLastSuccessfulWatermark(bool isBackfill = false) // Tham số isBackfill vẫn được giữ lại nhưng không còn được sử dụng ở đây.
+        public EtlWatermark GetLastSuccessfulWatermark()
         {
             var sql = @"
                 SELECT TOP 1 WatermarkLastModifiedAtUtc, WatermarkLastId FROM __ETLExecutionLog
-                WHERE SourceCollectionName = @SourceCollectionName AND UPPER(Status) = 'SUCCEEDED' AND WatermarkLastId IS NOT NULL AND WatermarkLastId <> ''
+                WHERE SourceCollectionName = @SourceCollectionName 
+                  AND UPPER(Status) = 'SUCCEEDED' 
+                  AND WatermarkLastId IS NOT NULL AND WatermarkLastId <> ''
                 ORDER BY WatermarkLastModifiedAtUtc DESC, Id DESC";
 
             try
             {
                 using var conn = new SqlConnection(connectionManager.ConnectionString.Value);
                 using var cmd = new SqlCommand(sql, conn);
-
                 cmd.Parameters.AddWithValue("@SourceCollectionName", sourceCollectionName);
-
                 conn.Open();
                 using var reader = cmd.ExecuteReader();
-
                 if (reader.Read())
                 {
                     var lastRunTime = reader.GetDateTime(0);
                     var lastId = reader.GetString(1);
-
                     var watermark = new EtlWatermark(DateTime.SpecifyKind(lastRunTime, DateTimeKind.Utc), lastId);
-                    Log.Information("[LogManager] Found last successful watermark in SQL: {Watermark}", watermark);
+                    Log.Information("[LogManager-Global] Found last successful GLOBAL watermark: {Watermark}", watermark);
                     return watermark;
                 }
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "[LogManager] An error occurred while fetching watermark with ADO.NET.");
+                Log.Error(ex, "[LogManager-Global] An error occurred while fetching global watermark.");
             }
 
-            // Nếu không tìm thấy log nào (ví dụ: lần chạy ĐẦU TIÊN của backfill),
-            // trả về một watermark "khởi tạo".
-            Log.Information("[LogManager] No successful run found. Initializing watermark.");
-            if (isBackfill)
-            {
-                // Cho backfill, chúng ta bắt đầu với ID rỗng để lấy từ đầu.
-                return new EtlWatermark(DateTime.MinValue, null);
-            }
-            else
-            {
-                // Cho chế độ thường, bắt đầu từ ngày mặc định.
-                return new EtlWatermark(FallbackStartDate, null);
-            }
+            Log.Information("[LogManager-Global] No successful run found of any kind. Initializing watermark.");
+            return new EtlWatermark(FallbackStartDate, null);
         }
 
-        public long GetTotalBackfillRecordsProcessed()
+        /// <summary>
+        /// Lấy watermark CHỈ dành cho job BACKFILL.
+        /// Hàm này hoạt động độc lập và chỉ phục vụ cho logic phân trang của backfill.
+        /// </summary>
+        public EtlWatermark? GetLastBackfillWatermark()
         {
             var sql = @"
-                SELECT ISNULL(SUM(SourceRecordCount), 0)
+                SELECT TOP 1 WatermarkLastModifiedAtUtc, WatermarkLastId 
                 FROM __ETLExecutionLog
-                WHERE SourceCollectionName = @SourceCollectionName AND UPPER(Status) = 'SUCCEEDED'";
+                WHERE SourceCollectionName = @SourceCollectionName 
+                  AND UPPER(Status) = 'SUCCEEDED'
+                  AND JobMode = 'Backfill'
+                  AND WatermarkLastId IS NOT NULL AND WatermarkLastId <> ''
+                ORDER BY Id DESC"; // Sắp xếp theo ID giảm dần để lấy lần chạy cuối cùng
 
             try
             {
-                var result = SqlTask.ExecuteScalar(connectionManager, sql, [new("SourceCollectionName", sourceCollectionName)]);
-                if (result != null && result != DBNull.Value)
+                using var conn = new SqlConnection(connectionManager.ConnectionString.Value);
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@SourceCollectionName", sourceCollectionName);
+                conn.Open();
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
                 {
-                    var total = Convert.ToInt64(result);
-                    Log.Information("[LogManager] Total records processed in previous backfills: {Total}", total);
-                    return total;
+                    var lastRunTime = reader.GetDateTime(0);
+                    var lastId = reader.GetString(1);
+                    var watermark = new EtlWatermark(DateTime.SpecifyKind(lastRunTime, DateTimeKind.Utc), lastId);
+                    Log.Information("[LogManager-Backfill] Found last successful backfill watermark: {Watermark}", watermark);
+                    return watermark;
                 }
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "[LogManager] Could not calculate total backfill records processed.");
+                Log.Error(ex, "[LogManager-Backfill] An error occurred while fetching backfill watermark.");
             }
-            return 0;
+
+            Log.Information("[LogManager-Backfill] No successful backfill run found. This must be the first run.");
+            return null;
         }
 
-        // Các phương thức StartNewLogEntry, UpdateLogEntryOnSuccess, UpdateLogEntryOnFailure không thay đổi.
         #region Unchanged Methods
-        public int StartNewLogEntry(EtlWatermark previousWatermark, EtlWatermark newWatermark)
+        public int StartNewLogEntry(EtlWatermark previousWatermark, EtlWatermark newWatermark, bool isBackfill)
         {
             var sql = @"
-                INSERT INTO __ETLExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkPreviousModifiedAtUtc, WatermarkLastModifiedAtUtc, WatermarkLastId, Status)
-                VALUES (@sourceCollectionName, GETUTCDATE(), @prevModAt, @newModAt, @newId, 'Started');
+                INSERT INTO __ETLExecutionLog (SourceCollectionName, ExecutionStartTimeUtc, WatermarkPreviousModifiedAtUtc, WatermarkLastModifiedAtUtc, WatermarkLastId, Status, JobMode)
+                VALUES (@sourceCollectionName, GETUTCDATE(), @prevModAt, @newModAt, @newId, 'Started', @jobMode);
                 SELECT SCOPE_IDENTITY();";
 
             var safePreviousModifiedAt = previousWatermark.LastModifiedAt == DateTime.MinValue
@@ -106,10 +109,11 @@ namespace MongoToSqlEtl.Managers
                 new("prevModAt", safePreviousModifiedAt),
                 new("newModAt", newWatermark.LastModifiedAt),
                 new("newId", (object?)newWatermark.LastId ?? DBNull.Value),
+                new("jobMode", isBackfill ? "Backfill" : "Live")
             };
 
             var logId = Convert.ToInt32(SqlTask.ExecuteScalar(connectionManager, sql, parameters));
-            Log.Information("[LogManager] Created new ETL log entry with ID: {LogId}", logId);
+            Log.Information("[LogManager] Created new ETL log entry with ID: {LogId} for a '{JobMode}' job.", logId, isBackfill ? "Backfill" : "Live");
             return logId;
         }
 
