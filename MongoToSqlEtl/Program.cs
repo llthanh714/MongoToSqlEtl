@@ -88,7 +88,11 @@ try
         })
         .UseConsole());
 
-    builder.Services.AddHangfireServer();
+    builder.Services.AddHangfireServer(options =>
+    {
+        // Limit the number of worker threads to 2
+        options.WorkerCount = 2;
+    });
 
     builder.WebHost.ConfigureKestrel(serverOptions =>
     {

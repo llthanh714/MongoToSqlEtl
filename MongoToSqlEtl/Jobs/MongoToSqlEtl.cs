@@ -184,7 +184,7 @@ namespace MongoToSqlEtl.Jobs
                 return valA.BsonType == BsonType.DateTime ? 1 : -1; // Sắp xếp theo ngày tăng dần
             });
 
-            // (SỬA ĐỔI) Watermark mới là bản ghi CŨ NHẤT trong batch (cho backfill) hoặc MỚI NHẤT (cho live)
+            // Watermark mới là bản ghi CŨ NHẤT trong batch (cho backfill) hoặc MỚI NHẤT (cho live)
             BsonDocument watermarkDoc;
             if (jobSettings.Backfill.Enabled)
             {
