@@ -86,6 +86,7 @@ try
             UseRecommendedIsolationLevel = true,
             DisableGlobalLocks = true
         })
+        .WithJobExpirationTimeout(TimeSpan.FromDays(2))
         .UseConsole());
 
     builder.Services.AddHangfireServer(options =>
