@@ -64,12 +64,14 @@ namespace MongoToSqlEtl.Jobs
                 var previousWatermark = LogManager.GetLastSuccessfulWatermark();
                 logId = LogManager.StartNewLogEntry(previousWatermark, newWatermark, jobSettings.Backfill.Enabled);
 
-                await TruncateStagingTablesAsync(context);
+                // await TruncateStagingTablesAsync(context);
+
                 var pipeline = BuildPipeline(batchData, context);
                 context?.WriteLine($"Starting Network execution for job '{SourceCollectionName}' with {batchData.Count} records...");
                 await Network.ExecuteAsync(pipeline.Source);
                 if (!string.IsNullOrEmpty(pipeline.SqlStoredProcedureName))
                 {
+                    context?.WriteLine($"Merging data by executing stored procedure '{pipeline.SqlStoredProcedureName}'...");
                     var mergeDataTask = new SqlTask($"EXEC {pipeline.SqlStoredProcedureName}") { ConnectionManager = SqlConnectionManager, DisableLogging = true };
                     await mergeDataTask.ExecuteNonQueryAsync();
                 }

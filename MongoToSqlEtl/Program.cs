@@ -91,8 +91,8 @@ try
 
     builder.Services.AddHangfireServer(options =>
     {
-        // Limit the number of worker threads to 2
-        options.WorkerCount = 2;
+        // Limit the number of worker threads to 1 for simplicity and to avoid concurrency issues
+        options.WorkerCount = 1;
     });
 
     builder.WebHost.ConfigureKestrel(serverOptions =>

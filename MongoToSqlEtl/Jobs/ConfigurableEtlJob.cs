@@ -81,7 +81,8 @@ namespace MongoToSqlEtl.Jobs
             var destination = new DbMerge<ExpandoObject>(SqlConnectionManager, currentMapping.SqlTableName)
             {
                 MergeMode = MergeMode.Delta,
-                IdColumns = [new IdColumn { IdPropertyName = "id" }]
+                IdColumns = [new IdColumn { IdPropertyName = "id" }],
+                BatchSize = 50
             };
             destinations.Add(destination);
 
